@@ -1,0 +1,160 @@
+category: Analytics & SIEM
+commonfields:
+  id: Cisco Umbrella S3 Event Collector
+  version: -1
+name: Cisco Umbrella S3 Event Collector
+display: Cisco Umbrella S3 Event Collector
+description: Collects Cisco Umbrella logs directly from the Cisco-managed S3 bucket by polling it with the access key and secret issued in the Umbrella dashboard, and posts them to an XSIAM HTTP Collector. No SQS queue, no customer-owned bucket and no bucket notifications are required.
+fromversion: 6.8.0
+marketplaces:
+- marketplacev2
+sectionOrder:
+- Connect
+- Collect
+configuration:
+- name: bucket
+  display: S3 bucket
+  additionalinfo: 'Default: cisco-managed-us-west-1. The Cisco-managed bucket shown on Umbrella Admin > Log Management. Other regions exist, e.g. cisco-managed-eu-west-1, cisco-managed-ap-southeast-1.'
+  defaultvalue: cisco-managed-us-west-1
+  type: 0
+  required: true
+  section: Connect
+- name: prefix
+  display: Bucket prefix (org folder)
+  additionalinfo: The folder Umbrella writes to, e.g. 1234567_a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0. No leading or trailing slash.
+  type: 0
+  required: true
+  section: Connect
+- name: region
+  display: AWS region
+  additionalinfo: 'Default: derived from the bucket name, so cisco-managed-us-west-1 gives us-west-1. Set it only if your bucket name does not carry the region.' 
+  type: 0
+  required: false
+  section: Connect
+- name: credentials
+  display: Umbrella S3 access key
+  displaypassword: Umbrella S3 secret key
+  additionalinfo: 'No default - required. The key/secret pair generated on Umbrella Admin > Log Management. The secret is exactly 40 characters and is shown once; Cisco requires rotation every 90 days.' 
+  type: 9
+  required: true
+  section: Connect
+- name: xsiam_url
+  display: XSIAM HTTP Collector URL
+  additionalinfo: 'No default - required before any event can be sent. Copy the API URL from Settings > Data Sources & Integrations > your custom HTTP collector. Full form https://api-<tenant>.xdr.<region>.paloaltonetworks.com/logs/v1/event - for example https://api-acmecorp.xdr.us.paloaltonetworks.com/logs/v1/event. Must end in /logs/v1/event.' 
+  type: 0
+  required: false
+  section: Connect
+- name: xsiam_token
+  display: XSIAM HTTP Collector API key
+  additionalinfo: 'No default - required before any event can be sent. Shown once when the HTTP collector is created; recreate the collector if lost. Must pair with the URL above from the SAME collector.' 
+  type: 4
+  required: false
+  section: Connect
+- name: no_compression
+  display: Send uncompressed (collector Compression = uncompressed)
+  additionalinfo: 'Default: unticked (gzip). The collector gzips every batch, which requires the HTTP collector Compression setting to be gzip. Tick this only if your collector was created as uncompressed - a mismatch fails with "gzip compression error (invalid header)".' 
+  type: 8
+  required: false
+  section: Connect
+  advanced: true
+- name: log_types
+  display: Log types to collect
+  additionalinfo: 'Default: auto, which discovers every folder present under your prefix - the right setting for a first run, and it adapts to any Umbrella licence. Pin the list explicitly for production so a newly licensed log type cannot start ingesting unnoticed. Which folders exist depends on licensing: dnslogs and auditlogs on every org, proxylogs with SWG/SIG, firewalllogs or cloudfirewalllogs with CDFW, intrusionlogs with IPS, dlplogs with DLP, iplogs with IP-layer enforcement.'
+  type: 16
+  required: true
+  defaultvalue: auto
+  options:
+  - auto
+  - dnslogs
+  - proxylogs
+  - firewalllogs
+  - cloudfirewalllogs
+  - iplogs
+  - auditlogs
+  - dlplogs
+  - intrusionlogs
+  section: Collect
+- name: first_fetch
+  display: First fetch time
+  additionalinfo: 'Default: 3 days. How far back the very first run starts; ignored afterwards. Cannot exceed the Cisco-managed bucket retention (7, 14 or 30 days, set in Umbrella). Start small - this is how much history you ingest and pay for.' 
+  defaultvalue: 3 days
+  type: 0
+  required: false
+  section: Collect
+- name: max_files_per_fetch
+  display: Max objects per log type per fetch
+  additionalinfo: 'Default: 100. Umbrella writes one file per log type per 10 minutes, so ~144/day - 100 is ample for steady state. Raise to 500-1000 while backfilling, then put it back so a stall cannot produce one huge burst.' 
+  defaultvalue: '100'
+  type: 0
+  required: false
+  section: Collect
+  advanced: true
+- name: max_events_per_fetch
+  display: Max events per log type per fetch
+  additionalinfo: 'Default: 200000. Usually the real throttle, not the file count - one busy DNS file can hold tens of thousands of rows. Raise both together when backfilling.' 
+  defaultvalue: '200000'
+  type: 0
+  required: false
+  section: Collect
+  advanced: true
+- name: max_runtime_seconds
+  display: Max run time per fetch (seconds)
+  additionalinfo: 'Default: 240 seconds. The collector stops cleanly at this point, commits what it sent and resumes next run, rather than being killed by the container timeout (which leaves the instance red). Keep it comfortably below your tenant script timeout.' 
+  defaultvalue: '240'
+  type: 0
+  required: false
+  section: Collect
+  advanced: true
+- name: column_overrides
+  display: Column overrides (JSON)
+  additionalinfo: 'Default: empty, using the built-in Umbrella schema v13 layouts. Override the CSV column order for one or more log types when Cisco bumps the schema, e.g. {"dnslogs": ["timestamp", "policy_identity", "..."]}. Position 1 of your list names CSV column 1.'
+  type: 12
+  required: false
+  section: Collect
+  advanced: true
+- name: isFetchEvents
+  display: Fetch events
+  type: 8
+  required: false
+  section: Collect
+- name: insecure
+  display: Trust any certificate (not secure)
+  type: 8
+  required: false
+  section: Connect
+  advanced: true
+- name: proxy
+  display: Use system proxy settings
+  type: 8
+  required: false
+  section: Connect
+  advanced: true
+script:
+  type: python
+  subtype: python3
+  dockerimage: demisto/boto3py3:1.0.0.12310318
+  isfetchevents: true
+  runonce: false
+  longRunning: false
+  commands:
+  - name: cisco-umbrella-s3-get-events
+    description: Fetches a sample of events from the Cisco-managed bucket for testing. Always starts from the configured first-fetch window and never reads or updates the fetch-events cursor - should_push_events=true WILL duplicate events already ingested by fetch-events.
+    arguments:
+    - name: log_type
+      description: Comma-separated log types to sample, e.g. dnslogs. Use auto to discover and sample every folder that exists under the prefix. Defaults to the instance log types.
+      required: false
+      isArray: true
+    - name: limit
+      description: Number of S3 objects to read per log type.
+      defaultValue: '1'
+      required: false
+    - name: should_push_events
+      description: Whether to also send the sampled events to the dataset.
+      defaultValue: 'false'
+      auto: PREDEFINED
+      predefined:
+      - 'true'
+      - 'false'
+      required: false
+    outputs: []
+  script: '@@SCRIPT@@'
