@@ -1,1 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" font-family='-apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif' viewBox="0 0 900 300" width="900" height="300" role="img" aria-label="Umbrella writes gzipped CSV to the Cisco-managed S3 bucket every ten minutes; the Cisco Umbrella S3 Event Collector integration polls it with ListObjectsV2 using a saved cursor, downloads and parses the files, and POSTs gzipped newline-delimited JSON to the cisco-umbrella-s3 HTTP Collector, which writes the raw dataset that data model rules map into XDM for queries and detections."><rect width="900" height="300" fill="#0D151A"/>
+          <defs>
+            <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#E6EEF2"/>
+            </marker>
+          </defs>
 
+          <!-- Cisco side -->
+          <text x="10" y="22" font-size="11" font-weight="600" letter-spacing="1.4" fill="#E6EEF2" opacity=".55">CISCO</text>
+          <rect x="10" y="34" width="170" height="70" rx="4" fill="none" stroke="#E6EEF2" stroke-width="1.5"/>
+          <text x="95" y="60" font-size="13" text-anchor="middle" fill="#E6EEF2">Umbrella</text>
+          <text x="95" y="78" font-size="11" text-anchor="middle" fill="#E6EEF2" opacity=".65">DNS · SWG · CDFW</text>
+          <text x="95" y="93" font-size="11" text-anchor="middle" fill="#E6EEF2" opacity=".65">IPS · DLP · audit</text>
+
+          <rect x="10" y="150" width="170" height="80" rx="4" fill="none" stroke="#E6EEF2" stroke-width="1.5"/>
+          <text x="95" y="176" font-size="13" text-anchor="middle" fill="#E6EEF2">cisco-managed-*</text>
+          <text x="95" y="194" font-size="11" text-anchor="middle" fill="#E6EEF2" opacity=".65">S3 bucket, read-only</text>
+          <text x="95" y="212" font-size="11" text-anchor="middle" fill="#E6EEF2" opacity=".65">.csv.gz, 7–30d retention</text>
+
+          <line x1="95" y1="104" x2="95" y2="146" stroke="#E6EEF2" stroke-width="1.5" marker-end="url(#ar)"/>
+          <text x="104" y="129" font-size="11" fill="#E6EEF2" opacity=".8">writes every 10 min</text>
+
+          <!-- XSIAM side -->
+          <text x="290" y="22" font-size="11" font-weight="600" letter-spacing="1.4" fill="#E6EEF2" opacity=".55">CORTEX XSIAM</text>
+          <rect x="286" y="34" width="600" height="240" rx="6" fill="none" stroke="#E6EEF2" stroke-width="1" stroke-dasharray="4 4" opacity=".45"/>
+
+          <g>
+            <rect x="306" y="150" width="180" height="80" rx="4" fill="none" stroke="#56C4BF" stroke-width="2"/>
+            <text x="396" y="174" font-size="12.5" text-anchor="middle" fill="#56C4BF" font-weight="600">Cisco Umbrella S3</text>
+            <text x="396" y="191" font-size="12.5" text-anchor="middle" fill="#56C4BF" font-weight="600">Event Collector</text>
+            <text x="396" y="211" font-size="11" text-anchor="middle" fill="#56C4BF" opacity=".75">cursor per log type</text>
+          </g>
+
+          <line x1="180" y1="180" x2="300" y2="180" stroke="#E6EEF2" stroke-width="1.5" marker-end="url(#ar)"/>
+          <text x="240" y="172" font-size="11" text-anchor="middle" fill="#E6EEF2" opacity=".8">ListObjectsV2</text>
+          <text x="240" y="199" font-size="11" text-anchor="middle" fill="#E6EEF2" opacity=".8">GET each .gz</text>
+
+          <rect x="530" y="150" width="150" height="80" rx="4" fill="none" stroke="#E6EEF2" stroke-width="1.5"/>
+          <text x="605" y="173" font-size="12.5" text-anchor="middle" fill="#E6EEF2">HTTP Collector</text>
+          <text x="605" y="191" font-size="11" text-anchor="middle" fill="#E6EEF2" opacity=".8">cisco-umbrella-s3</text>
+          <text x="605" y="208" font-size="11" text-anchor="middle" fill="#E6EEF2" opacity=".6">/logs/v1/event</text>
+
+          <line x1="486" y1="180" x2="524" y2="180" stroke="#E6EEF2" stroke-width="1.5" marker-end="url(#ar)"/>
+          <text x="505" y="143" font-size="11" text-anchor="middle" fill="#E6EEF2" opacity=".8">POST gzip NDJSON</text>
+
+          <rect x="724" y="150" width="140" height="80" rx="4" fill="none" stroke="#E6EEF2" stroke-width="1.5"/>
+          <text x="794" y="176" font-size="13" text-anchor="middle" fill="#E6EEF2">Dataset</text>
+          <text x="794" y="196" font-size="11" text-anchor="middle" fill="#E6EEF2" opacity=".65">cisco_umbrella</text>
+          <text x="794" y="211" font-size="11" text-anchor="middle" fill="#E6EEF2" opacity=".65">_s3_raw</text>
+
+          <line x1="680" y1="180" x2="718" y2="180" stroke="#E6EEF2" stroke-width="1.5" marker-end="url(#ar)"/>
+
+          <rect x="724" y="54" width="140" height="62" rx="4" fill="none" stroke="#E6EEF2" stroke-width="1.5"/>
+          <text x="794" y="80" font-size="13" text-anchor="middle" fill="#E6EEF2">XDM</text>
+          <text x="794" y="98" font-size="11" text-anchor="middle" fill="#E6EEF2" opacity=".65">queries, detections</text>
+
+          <line x1="794" y1="146" x2="794" y2="120" stroke="#E6EEF2" stroke-width="1.5" marker-end="url(#ar)"/>
+          <text x="784" y="136" font-size="11" text-anchor="end" fill="#E6EEF2" opacity=".8">data model rule</text>
+        </svg>
