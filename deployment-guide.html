@@ -1,0 +1,1328 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Deployment guide: ingest every Cisco Umbrella log type into Cortex XSIAM directly from the Cisco-managed S3 bucket - no SQS required.">
+<title>Umbrella to XSIAM Collector - Deployment Guide</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=Source+Sans+3:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+  :root {
+    --ground: #F2F5F7;
+    --surface: #FFFFFF;
+    --surface-sunk: #EAEFF3;
+    --ink: #131E27;
+    --ink-soft: #566875;
+    --ink-faint: #8195A2;
+    --line: #D7E0E7;
+    --line-strong: #B9C7D2;
+    --accent: #0C6B70;
+    --accent-soft: #E0F0EF;
+    --umbrella: #2B4A97;
+    --umbrella-soft: #E4EAF8;
+    --xsiam: #A85310;
+    --xsiam-soft: #FBEBDC;
+    --warn-ink: #7A5300;
+    --warn-bg: #FDF3DC;
+    --warn-line: #E7CE94;
+    --danger: #9C2A20;
+    --code-bg: #10222A;
+    --code-ink: #DCE8EA;
+    --code-line: #23404A;
+    --shadow: 0 1px 2px rgba(19, 30, 39, .05), 0 8px 24px -18px rgba(19, 30, 39, .5);
+    --radius: 6px;
+    --display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+    --body: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0D151A;
+      --surface: #141F26;
+      --surface-sunk: #101A20;
+      --ink: #E6EEF2;
+      --ink-soft: #9BAEBA;
+      --ink-faint: #748996;
+      --line: #24343E;
+      --line-strong: #334753;
+      --accent: #56C4BF;
+      --accent-soft: #14312F;
+      --umbrella: #8CA9F0;
+      --umbrella-soft: #1A2440;
+      --xsiam: #E8A166;
+      --xsiam-soft: #2E2015;
+      --warn-ink: #E7C177;
+      --warn-bg: #2A2214;
+      --warn-line: #4C3D1D;
+      --danger: #E88178;
+      --code-bg: #0A171D;
+      --code-ink: #D3E2E5;
+      --code-line: #1E343D;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 28px -20px rgba(0, 0, 0, .9);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #0D151A;
+    --surface: #141F26;
+    --surface-sunk: #101A20;
+    --ink: #E6EEF2;
+    --ink-soft: #9BAEBA;
+    --ink-faint: #748996;
+    --line: #24343E;
+    --line-strong: #334753;
+    --accent: #56C4BF;
+    --accent-soft: #14312F;
+    --umbrella: #8CA9F0;
+    --umbrella-soft: #1A2440;
+    --xsiam: #E8A166;
+    --xsiam-soft: #2E2015;
+    --warn-ink: #E7C177;
+    --warn-bg: #2A2214;
+    --warn-line: #4C3D1D;
+    --danger: #E88178;
+    --code-bg: #0A171D;
+    --code-ink: #D3E2E5;
+    --code-line: #1E343D;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 28px -20px rgba(0, 0, 0, .9);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 940px;
+    margin: 0 auto;
+    padding: 48px 24px 96px;
+  }
+
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible, button:focus-visible, input:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  code, kbd, pre { font-family: var(--mono); }
+
+  /* ---------- masthead ---------- */
+  .masthead { display: flex; flex-direction: column; gap: 14px; padding-bottom: 28px; }
+  .eyebrow {
+    font-family: var(--display);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+  h1 {
+    font-family: var(--display);
+    font-size: clamp(30px, 5vw, 42px);
+    font-weight: 700;
+    letter-spacing: -.02em;
+    line-height: 1.1;
+    margin: 0;
+    text-wrap: balance;
+  }
+  .standfirst {
+    font-size: 18px;
+    color: var(--ink-soft);
+    max-width: 62ch;
+    margin: 0;
+  }
+  .facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 28px;
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    padding: 12px 0;
+    margin-top: 6px;
+    font-size: 13px;
+    color: var(--ink-soft);
+  }
+  .facts b {
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: 11px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    display: block;
+  }
+
+  /* ---------- phase jump nav ---------- */
+  .jump { display: flex; flex-wrap: wrap; gap: 6px; margin: 22px 0 40px; }
+  .jump a {
+    font-family: var(--display);
+    font-size: 12.5px;
+    font-weight: 500;
+    text-decoration: none;
+    color: var(--ink-soft);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 100px;
+    padding: 5px 12px;
+    transition: border-color .15s, color .15s;
+  }
+  .jump a:hover { color: var(--accent); border-color: var(--accent); }
+  .jump a span { color: var(--ink-faint); font-variant-numeric: tabular-nums; }
+
+  /* ---------- callout ---------- */
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    padding: 22px 24px;
+  }
+  .panel h2 { margin-top: 0; }
+  .panel ul { margin: 0; padding-left: 18px; }
+  .panel li + li { margin-top: 7px; }
+
+  .note {
+    border-left: 3px solid var(--line-strong);
+    background: var(--surface-sunk);
+    padding: 12px 16px;
+    border-radius: 0 var(--radius) var(--radius) 0;
+    font-size: 15px;
+    color: var(--ink-soft);
+  }
+  .note.warn {
+    border-left-color: var(--warn-line);
+    background: var(--warn-bg);
+    color: var(--warn-ink);
+  }
+  .note strong { color: inherit; }
+
+  /* ---------- phases ---------- */
+  .phase { margin-top: 52px; }
+  .phase-head {
+    display: grid;
+    grid-template-columns: 72px 1fr;
+    gap: 20px;
+    align-items: start;
+    border-top: 2px solid var(--ink);
+    padding-top: 14px;
+  }
+  .phase-num {
+    font-family: var(--display);
+    font-size: 34px;
+    font-weight: 700;
+    line-height: 1;
+    letter-spacing: -.03em;
+    color: var(--ink-faint);
+    font-variant-numeric: tabular-nums;
+  }
+  h2 {
+    font-family: var(--display);
+    font-size: 23px;
+    font-weight: 600;
+    letter-spacing: -.01em;
+    margin: 0 0 6px;
+    text-wrap: balance;
+  }
+  .phase-sub { margin: 0; color: var(--ink-soft); font-size: 15.5px; max-width: 64ch; }
+  .phase-body { padding-left: 92px; padding-top: 20px; }
+
+  .console {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--display);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    padding: 3px 9px;
+    border-radius: 3px;
+    vertical-align: 3px;
+    margin-left: 10px;
+  }
+  .console.umbrella { color: var(--umbrella); background: var(--umbrella-soft); }
+  .console.xsiam { color: var(--xsiam); background: var(--xsiam-soft); }
+  .console.both { color: var(--accent); background: var(--accent-soft); }
+
+  /* ---------- steps ---------- */
+  ol.steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 18px; }
+  ol.steps > li { display: grid; grid-template-columns: 26px 1fr; gap: 12px; }
+  ol.steps > li > div > *:first-child { margin-top: 0; }
+  ol.steps > li > div > *:last-child { margin-bottom: 0; }
+  .tick {
+    appearance: none;
+    width: 17px; height: 17px;
+    margin: 4px 0 0;
+    border: 1.5px solid var(--line-strong);
+    border-radius: 3px;
+    background: var(--surface);
+    cursor: pointer;
+    display: grid;
+    place-content: center;
+    transition: background .12s, border-color .12s;
+  }
+  .tick:checked { background: var(--accent); border-color: var(--accent); }
+  .tick:checked::after {
+    content: "";
+    width: 9px; height: 5px;
+    border: 2px solid var(--surface);
+    border-top: 0; border-right: 0;
+    transform: rotate(-45deg) translate(1px, -1px);
+  }
+  li:has(.tick:checked) .step-title { color: var(--ink-faint); text-decoration: line-through; text-decoration-color: var(--line-strong); }
+  .step-title { font-weight: 600; }
+  .path {
+    font-family: var(--mono);
+    font-size: 13.5px;
+    background: var(--surface-sunk);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 1px 5px;
+    white-space: nowrap;
+  }
+  p code, li code, td code {
+    font-size: 13.5px;
+    background: var(--surface-sunk);
+    border-radius: 3px;
+    padding: 1px 5px;
+  }
+
+  /* ---------- code ---------- */
+  .code {
+    position: relative;
+    margin: 14px 0;
+    background: var(--code-bg);
+    border: 1px solid var(--code-line);
+    border-radius: var(--radius);
+  }
+  .code pre {
+    margin: 0;
+    padding: 14px 16px;
+    overflow-x: auto;
+    color: var(--code-ink);
+    font-size: 13px;
+    line-height: 1.65;
+  }
+  .code .cap {
+    font-family: var(--display);
+    font-size: 10.5px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    padding: 8px 16px 0;
+    display: block;
+  }
+  .copy {
+    position: absolute;
+    top: 8px; right: 8px;
+    font-family: var(--display);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: .04em;
+    color: var(--code-ink);
+    background: rgba(255,255,255,.07);
+    border: 1px solid var(--code-line);
+    border-radius: 3px;
+    padding: 3px 8px;
+    cursor: pointer;
+    opacity: .75;
+  }
+  .copy:hover { opacity: 1; }
+
+  /* ---------- tables ---------- */
+  .scroll { overflow-x: auto; margin: 16px 0; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: 14.5px; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th {
+    font-family: var(--display);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    background: var(--surface-sunk);
+    white-space: nowrap;
+  }
+  tr:last-child td { border-bottom: 0; }
+  td.k { font-weight: 600; white-space: nowrap; }
+  td.v { font-family: var(--mono); font-size: 13px; word-break: break-all; }
+  .sym { color: var(--danger); font-family: var(--mono); font-size: 13px; }
+
+  h3 {
+    font-family: var(--display);
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: .01em;
+    margin: 30px 0 10px;
+  }
+
+  footer {
+    margin-top: 64px;
+    border-top: 1px solid var(--line);
+    padding-top: 18px;
+    font-size: 14px;
+    color: var(--ink-faint);
+  }
+  footer a { color: var(--ink-soft); }
+
+  @media (max-width: 680px) {
+    .phase-head { grid-template-columns: 44px 1fr; gap: 12px; }
+    .phase-num { font-size: 24px; }
+    .phase-body { padding-left: 0; }
+    .console { margin-left: 0; display: flex; width: fit-content; margin-top: 8px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
+
+  /* ---------- architecture ---------- */
+  figure { margin: 22px 0; }
+  figure svg { width: 100%; max-width: 100%; height: auto; display: block; }
+  figcaption {
+    font-size: 13.5px; color: var(--ink-soft); margin-top: 10px;
+    padding-left: 2px; max-width: 70ch;
+  }
+  .parts { display: grid; gap: 14px; margin: 20px 0; }
+  @media (min-width: 720px) { .parts { grid-template-columns: 1fr 1fr; } }
+  .part {
+    border: 1px solid var(--line); border-radius: var(--radius);
+    background: var(--surface); padding: 16px 18px;
+  }
+  .part h4 {
+    font-family: var(--display); font-size: 14px; font-weight: 600;
+    margin: 0 0 6px; letter-spacing: .01em;
+  }
+  .part p { margin: 0; font-size: 14.5px; color: var(--ink-soft); }
+  .part .who {
+    font-family: var(--display); font-size: 10px; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--ink-faint); display: block; margin-bottom: 4px;
+  }
+  .lic { font-size: 14.5px; }
+  .lic td:first-child { font-family: var(--mono); font-size: 13px; white-space: nowrap; }
+  details {
+    border: 1px solid var(--line); border-radius: var(--radius);
+    background: var(--surface); padding: 10px 16px; margin: 12px 0;
+  }
+  summary {
+    font-family: var(--display); font-weight: 600; font-size: 14.5px;
+    cursor: pointer; padding: 4px 0;
+  }
+  summary:hover { color: var(--accent); }
+  .accent-ink { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="eyebrow">Cortex XSIAM · deployment guide · by iTalkCyber</div>
+    <h1>Cisco Umbrella S3 Collector</h1>
+    <p class="standfirst">A custom event collector that reads Cisco Umbrella logs straight out of the Cisco-managed S3 bucket by polling it — every log type, every licence tier. No SQS queue, no S3 bucket of your own, no Lambda.</p>
+    <div class="facts">
+      <div><b>Source</b>s3://cisco-managed-&lt;region&gt;/&lt;orgid&gt;_&lt;hash&gt;/</div>
+      <div><b>Dataset</b>cisco_umbrella_s3_raw</div>
+      <div><b>Time</b>~45 min + one fetch cycle</div>
+    </div>
+  </header>
+
+  <nav class="jump">
+    <a href="#arch">&nbsp;How it works</a>
+    <a href="#p0"><span>00</span> &nbsp;Prerequisites</a>
+    <a href="#p1"><span>01</span> &nbsp;Umbrella keys</a>
+    <a href="#p2"><span>02</span> &nbsp;Upload</a>
+    <a href="#p2b"><span>02b</span> &nbsp;Collector</a>
+    <a href="#p3"><span>03</span> &nbsp;Settings</a>
+    <a href="#p4"><span>04</span> &nbsp;Smoke test</a>
+    <a href="#p5"><span>05</span> &nbsp;First fetch</a>
+    <a href="#p6"><span>06</span> &nbsp;Data model</a>
+    <a href="#p7"><span>07</span> &nbsp;Volume</a>
+    <a href="#p8"><span>08</span> &nbsp;Monitoring</a>
+    <a href="#tr">&nbsp;Troubleshooting</a>
+    <a href="#xql">&nbsp;XQL library</a>
+  </nav>
+
+  <!-- ============ ARCHITECTURE ============ -->
+  <section class="phase" id="arch">
+    <div class="phase-head">
+      <div class="phase-num">→</div>
+      <div>
+        <h2>How it works, and why it's built this way</h2>
+        <p class="phase-sub">Written for engineers who know S3 and HTTP but have never configured XSIAM. Every Cortex-specific term used later is defined here.</p>
+      </div>
+    </div>
+    <div class="phase-body">
+
+      <p>Cisco Umbrella can export its logs to an S3 bucket. You get two choices: a bucket you own, or a bucket Cisco owns and manages for you. This guide covers the second, because it needs no AWS account of your own — Cisco hands you a bucket path and a read-only key pair, and that's the entire integration surface.</p>
+
+      <figure>
+        <svg viewBox="0 0 900 300" role="img" aria-label="Umbrella writes gzipped CSV to the Cisco-managed S3 bucket every ten minutes; the Cisco Umbrella S3 Event Collector integration polls it with ListObjectsV2 using a saved cursor, downloads and parses the files, and POSTs gzipped newline-delimited JSON to the cisco-umbrella-s3 HTTP Collector, which writes the raw dataset that data model rules map into XDM for queries and detections.">
+          <defs>
+            <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+            </marker>
+          </defs>
+
+          <!-- Cisco side -->
+          <text x="10" y="22" font-size="11" font-weight="600" letter-spacing="1.4" fill="currentColor" opacity=".55">CISCO</text>
+          <rect x="10" y="34" width="170" height="70" rx="4" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <text x="95" y="60" font-size="13" text-anchor="middle" fill="currentColor">Umbrella</text>
+          <text x="95" y="78" font-size="11" text-anchor="middle" fill="currentColor" opacity=".65">DNS · SWG · CDFW</text>
+          <text x="95" y="93" font-size="11" text-anchor="middle" fill="currentColor" opacity=".65">IPS · DLP · audit</text>
+
+          <rect x="10" y="150" width="170" height="80" rx="4" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <text x="95" y="176" font-size="13" text-anchor="middle" fill="currentColor">cisco-managed-*</text>
+          <text x="95" y="194" font-size="11" text-anchor="middle" fill="currentColor" opacity=".65">S3 bucket, read-only</text>
+          <text x="95" y="212" font-size="11" text-anchor="middle" fill="currentColor" opacity=".65">.csv.gz, 7–30d retention</text>
+
+          <line x1="95" y1="104" x2="95" y2="146" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+          <text x="104" y="129" font-size="11" fill="currentColor" opacity=".8">writes every 10 min</text>
+
+          <!-- XSIAM side -->
+          <text x="290" y="22" font-size="11" font-weight="600" letter-spacing="1.4" fill="currentColor" opacity=".55">CORTEX XSIAM</text>
+          <rect x="286" y="34" width="600" height="240" rx="6" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="4 4" opacity=".45"/>
+
+          <g class="accent-ink">
+            <rect x="306" y="150" width="180" height="80" rx="4" fill="none" stroke="currentColor" stroke-width="2"/>
+            <text x="396" y="174" font-size="12.5" text-anchor="middle" fill="currentColor" font-weight="600">Cisco Umbrella S3</text>
+            <text x="396" y="191" font-size="12.5" text-anchor="middle" fill="currentColor" font-weight="600">Event Collector</text>
+            <text x="396" y="211" font-size="11" text-anchor="middle" fill="currentColor" opacity=".75">cursor per log type</text>
+          </g>
+
+          <line x1="180" y1="180" x2="300" y2="180" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+          <text x="240" y="172" font-size="11" text-anchor="middle" fill="currentColor" opacity=".8">ListObjectsV2</text>
+          <text x="240" y="199" font-size="11" text-anchor="middle" fill="currentColor" opacity=".8">GET each .gz</text>
+
+          <rect x="530" y="150" width="150" height="80" rx="4" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <text x="605" y="173" font-size="12.5" text-anchor="middle" fill="currentColor">HTTP Collector</text>
+          <text x="605" y="191" font-size="11" text-anchor="middle" fill="currentColor" opacity=".8">cisco-umbrella-s3</text>
+          <text x="605" y="208" font-size="11" text-anchor="middle" fill="currentColor" opacity=".6">/logs/v1/event</text>
+
+          <line x1="486" y1="180" x2="524" y2="180" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+          <text x="505" y="143" font-size="11" text-anchor="middle" fill="currentColor" opacity=".8">POST gzip NDJSON</text>
+
+          <rect x="724" y="150" width="140" height="80" rx="4" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <text x="794" y="176" font-size="13" text-anchor="middle" fill="currentColor">Dataset</text>
+          <text x="794" y="196" font-size="11" text-anchor="middle" fill="currentColor" opacity=".65">cisco_umbrella</text>
+          <text x="794" y="211" font-size="11" text-anchor="middle" fill="currentColor" opacity=".65">_s3_raw</text>
+
+          <line x1="680" y1="180" x2="718" y2="180" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+
+          <rect x="724" y="54" width="140" height="62" rx="4" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <text x="794" y="80" font-size="13" text-anchor="middle" fill="currentColor">XDM</text>
+          <text x="794" y="98" font-size="11" text-anchor="middle" fill="currentColor" opacity=".65">queries, detections</text>
+
+          <line x1="794" y1="146" x2="794" y2="120" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+          <text x="784" y="136" font-size="11" text-anchor="end" fill="currentColor" opacity=".8">data model rule</text>
+        </svg>
+        <figcaption>The whole path. Umbrella writes gzipped CSV on its own schedule; nothing pushes to XSIAM, so the Cisco Umbrella S3 Event Collector (teal) has to go and look. Everything right of the collector is standard XSIAM plumbing you configure once.</figcaption>
+      </figure>
+
+      <h3>What each piece is for</h3>
+
+      <div class="parts">
+        <div class="part">
+          <span class="who">Cisco side</span>
+          <h4>The Cisco-managed bucket</h4>
+          <p>Umbrella drops one gzipped CSV per log type roughly every 10 minutes, into date folders under your org prefix. You get read-only keys for your prefix and nothing else — you cannot configure the bucket, only read it. Retention is 7, 14 or 30 days; past that the data is gone.</p>
+        </div>
+        <div class="part">
+          <span class="who">XSIAM · custom content</span>
+          <h4>The event collector</h4>
+          <p>A Python integration you upload. On a timer it lists new objects, downloads and un-gzips them, turns each CSV row into a JSON object with named fields, and posts them onward. It remembers its position per log type, so each run picks up where the last stopped.</p>
+        </div>
+        <div class="part">
+          <span class="who">XSIAM · ingestion</span>
+          <h4>The HTTP Collector</h4>
+          <p>A generic ingestion endpoint: anything that can POST JSON can feed XSIAM through it. Its <em>vendor</em> and <em>product</em> settings decide the dataset name. It exists here because a custom integration is not permitted to write to a dataset directly (see below).</p>
+        </div>
+        <div class="part">
+          <span class="who">XSIAM · storage</span>
+          <h4>The dataset</h4>
+          <p>A table in the data lake, named <code>&lt;vendor&gt;_&lt;product&gt;_raw</code>. Every field the collector sends is stored and searchable with XQL, Cortex's query language, whether or not it is mapped to anything.</p>
+        </div>
+        <div class="part">
+          <span class="who">XSIAM · normalisation</span>
+          <h4>Data model rules and XDM</h4>
+          <p>XDM is Cortex's common schema. A data model rule maps vendor fields onto XDM ones — <code>domain</code> becomes <code>xdm.network.dns.dns_question.name</code> — so a query or detection written once matches Umbrella, your firewall and your endpoints alike. Optional: skip it and the raw data still queries fine.</p>
+        </div>
+        <div class="part">
+          <span class="who">XSIAM · scheduling</span>
+          <h4>The instance</h4>
+          <p>One configured copy of the integration: credentials, which log types, how often to run. You can run several instances of the same integration — one per Umbrella org, for example — each with its own cursor.</p>
+        </div>
+      </div>
+
+      <h3>Two design decisions worth understanding before you start</h3>
+
+      <p><strong>Why polling and not the built-in S3 data source.</strong> XSIAM's native Amazon S3 collection is notification-driven: the bucket publishes an <code>s3:ObjectCreated</code> event to an SQS queue and XSIAM consumes that queue. Only a bucket's owner can configure notifications, and these buckets belong to Cisco. Your key is read-only on your own prefix, so there is no SQS queue to create and nothing to subscribe to. The alternative is switching Umbrella to a bucket you own and building the queue — which is what Palo Alto's Terraform module does, and precisely what this avoids.</p>
+
+      <figure>
+        <svg viewBox="0 0 900 200" role="img" aria-label="With a self-managed bucket, Umbrella writes to your bucket which notifies an SQS queue that the native XSIAM S3 collector consumes. With a Cisco-managed bucket, no notification can be configured because Cisco owns the bucket, so the collector must poll it instead.">
+          <defs>
+            <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+            </marker>
+          </defs>
+
+          <text x="10" y="20" font-size="11" font-weight="600" letter-spacing="1.2" fill="currentColor" opacity=".55">SELF-MANAGED BUCKET — the standard route</text>
+          <rect x="10" y="32" width="150" height="42" rx="4" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <text x="85" y="58" font-size="12" text-anchor="middle" fill="currentColor">your S3 bucket</text>
+          <line x1="160" y1="53" x2="238" y2="53" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar2)"/>
+          <text x="199" y="46" font-size="11" text-anchor="middle" fill="currentColor" opacity=".8">notifies</text>
+          <rect x="244" y="32" width="120" height="42" rx="4" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <text x="304" y="58" font-size="12" text-anchor="middle" fill="currentColor">SQS queue</text>
+          <line x1="364" y1="53" x2="442" y2="53" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar2)"/>
+          <text x="403" y="46" font-size="11" text-anchor="middle" fill="currentColor" opacity=".8">consumes</text>
+          <rect x="448" y="32" width="200" height="42" rx="4" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <text x="548" y="58" font-size="12" text-anchor="middle" fill="currentColor">native S3 data source</text>
+
+          <line x1="10" y1="95" x2="890" y2="95" stroke="currentColor" stroke-width="1" opacity=".25"/>
+
+          <text x="10" y="118" font-size="11" font-weight="600" letter-spacing="1.2" fill="currentColor" opacity=".55">CISCO-MANAGED BUCKET — this build</text>
+          <rect x="10" y="130" width="150" height="34" rx="4" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <text x="85" y="152" font-size="12" text-anchor="middle" fill="currentColor">Cisco's bucket</text>
+          <g opacity=".45">
+            <line x1="160" y1="147" x2="238" y2="147" stroke="currentColor" stroke-width="1.5" stroke-dasharray="4 3"/>
+            <line x1="188" y1="137" x2="210" y2="157" stroke="currentColor" stroke-width="1.5"/>
+            <line x1="210" y1="137" x2="188" y2="157" stroke="currentColor" stroke-width="1.5"/>
+            <rect x="244" y="130" width="120" height="34" rx="4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-dasharray="4 3"/>
+            <text x="304" y="152" font-size="12" text-anchor="middle" fill="currentColor">no SQS possible</text>
+          </g>
+          <g class="accent-ink">
+            <path d="M 85 164 L 85 172 L 548 172 L 548 164" fill="none" stroke="currentColor" stroke-width="2" marker-end="url(#ar2)"/>
+            <text x="316" y="186" font-size="11" text-anchor="middle" fill="currentColor" font-weight="600">the collector polls the bucket directly</text>
+          </g>
+          <rect x="448" y="130" width="200" height="34" rx="4" fill="none" stroke="currentColor" stroke-width="1.5"/>
+          <text x="548" y="145" font-size="11" text-anchor="middle" fill="currentColor">Cisco Umbrella S3</text>
+          <text x="548" y="159" font-size="11" text-anchor="middle" fill="currentColor">Event Collector</text>
+        </svg>
+        <figcaption>The one edge that changes. Bucket notifications can only be set by the bucket's owner, so the top route is unavailable — the collector replaces both the notification and the queue with a polling loop and a saved cursor.</figcaption>
+      </figure>
+
+      <p><strong>Why events go via an HTTP Collector.</strong> The obvious way for an integration to write events is the platform's <code>send_events_to_xsiam()</code> helper. Palo Alto document it as working <em>"only if the integration is a system integration. The function will fail if it will be called from a custom integration."</em> Content you upload yourself is custom content, so it fails with <code>command 'getLicenseCustomField' is only available for system content</code>. Posting to an HTTP Collector needs no privileged call and is the supported path. The visible cost: ingestion counters attribute the data to the collector, not to the integration.</p>
+
+      <details>
+        <summary>How the collector knows what it has already read</summary>
+        <p style="font-size:14.5px;color:var(--ink-soft)">Per log type it stores a cursor — an object key marker — plus a ring buffer of the last 4,000 keys it processed. Each run lists objects after the marker, skips anything in the ring, and processes the rest.</p>
+        <p style="font-size:14.5px;color:var(--ink-soft)">The marker deliberately lags the newest object by 30 minutes. Umbrella object names end in a random suffix (<code>…-00-05-aaaa</code>, <code>…-00-05-zzzz</code>), so a file uploaded slightly late can sort <em>before</em> one already processed. A cursor parked at the highest key seen would step over it and never look back — silently. The 30-minute overlap is re-listed every run and de-duplicated against the ring buffer.</p>
+        <p style="font-size:14.5px;color:var(--ink-soft)">State is saved after every push, not once at the end, so a run that dies mid-backfill keeps what it delivered. Delivery is at-least-once: dedupe on <code>s3_key</code> plus the row if exactness matters to you.</p>
+      </details>
+
+      <details>
+        <summary>Which log types your licence gives you</summary>
+        <div class="scroll"><table class="lic">
+          <thead><tr><th>Folder</th><th>Contents</th><th>Requires</th></tr></thead>
+          <tbody>
+            <tr><td>dnslogs</td><td>Every DNS query and its verdict</td><td>Any Umbrella licence — and by far the highest volume</td></tr>
+            <tr><td>auditlogs</td><td>Admin actions in the Umbrella dashboard</td><td>Any licence. Written only when someone changes something</td></tr>
+            <tr><td>proxylogs</td><td>Full URL, method, status, file hashes, AMP verdicts</td><td>SIG or Secure Web Gateway</td></tr>
+            <tr><td>firewalllogs<br>cloudfirewalllogs</td><td>L3/L4 connections, verdicts, byte counts</td><td>Cloud Delivered Firewall. Both folder names occur</td></tr>
+            <tr><td>intrusionlogs</td><td>IPS signature hits</td><td>CDFW with IPS</td></tr>
+            <tr><td>dlplogs</td><td>DLP rule matches, file and classification detail</td><td>Umbrella DLP</td></tr>
+            <tr><td>iplogs</td><td>IP-layer enforcement sessions</td><td>IP-layer enforcement enabled</td></tr>
+          </tbody>
+        </table></div>
+        <p style="font-size:14.5px;color:var(--ink-soft);margin-top:12px">The collector ships column layouts for all seven at Umbrella log schema v13, and the data model rule file has a block for each. You don't need to know in advance which you have — Phase 04 discovers it from the bucket.</p>
+      </details>
+
+    </div>
+  </section>
+
+  <!-- ============ 0 ============ -->
+  <section class="phase" id="p0">
+    <div class="phase-head">
+      <div class="phase-num">00</div>
+      <div>
+        <h2>What you need before you start<span class="console both">both consoles</span></h2>
+        <p class="phase-sub">Two admin sessions and two files. Nothing is installed on-premises and no AWS account of your own is involved.</p>
+      </div>
+    </div>
+    <div class="phase-body">
+      <div class="panel">
+        <ul>
+          <li><strong>XSIAM role</strong> — an admin role that can create integration instances and edit data-management content. On a stock tenant that's <em>Instance Administrator</em>; on a custom role you need <span class="path">Automation &amp; Feed Integrations</span> and <span class="path">Data Management</span> both set to Read/Write. Without them the upload control simply won't render.</li>
+          <li><strong>Umbrella role</strong> — Full Admin on the Umbrella org, which is what gates <span class="path">Admin → Log Management</span> and key rotation.</li>
+          <li><strong>Two files</strong> — <code>CiscoUmbrellaS3EventCollector.yml</code> (the integration) and <code>CiscoUmbrellaS3ModelingRules.xif</code> (the XDM mapping).</li>
+          <li><strong>Egress</strong> — only matters if you run the integration on your own engine rather than the tenant: outbound TCP/443 to <code>cisco-managed-&lt;region&gt;.s3.&lt;region&gt;.amazonaws.com</code> and to your tenant's API host.</li>
+        </ul>
+      </div>
+      <div class="note warn" style="margin-top:16px;"><strong>Do this in a dev tenant first if you have one.</strong> Phase 07 is where DNS log volume gets decided, and that decision is expensive to reverse once it's on your production ingestion licence.</div>
+    </div>
+  </section>
+
+  <!-- ============ 1 ============ -->
+  <section class="phase" id="p1">
+    <div class="phase-head">
+      <div class="phase-num">01</div>
+      <div>
+        <h2>Collect the bucket credentials<span class="console umbrella">Umbrella</span></h2>
+        <p class="phase-sub">The Umbrella dashboard is the only place these keys exist — it shows the secret once and never stores it.</p>
+      </div>
+    </div>
+    <div class="phase-body">
+      <ol class="steps">
+        <li><input type="checkbox" class="tick" id="s1a"><div>
+          <label class="step-title" for="s1a">Open <span class="path">Admin → Log Management</span></label>
+          <p>Confirm the org is set to <em>Use a Cisco-managed S3 bucket</em>, and note two things: the <strong>region</strong> and the <strong>retention period</strong> (7, 14 or 30 days). Retention is your hard ceiling for backfill — you cannot fetch anything older.</p>
+        </div></li>
+        <li><input type="checkbox" class="tick" id="s1b"><div>
+          <label class="step-title" for="s1b">Split the S3 URI into bucket and prefix</label>
+          <p>The collector takes them separately, with no slashes and no <code>s3://</code>. From <code>s3://cisco-managed-us-west-1/1234567_a1b2…a9b0/</code>:</p>
+          <div class="scroll"><table>
+            <tr><td class="k">Bucket</td><td class="v">cisco-managed-us-west-1</td></tr>
+            <tr><td class="k">Prefix</td><td class="v">1234567_a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0</td></tr>
+            <tr><td class="k">Region</td><td class="v"><em style="font-family:var(--body)">leave blank — derived from the bucket name</em></td></tr>
+          </table></div>
+        </div></li>
+        <li><input type="checkbox" class="tick" id="s1c"><div>
+          <label class="step-title" for="s1c">Get the access key and secret</label>
+          <p>If you still have the pair from when logging was enabled, use it. If the secret is lost, the only route is <em>Rotate keys</em> — Umbrella will not re-display an old secret. The access key is 20 characters, the secret exactly <strong>40</strong>; a 39-character paste is the single most common cause of the auth failure in the troubleshooting table.</p>
+          <div class="note warn"><strong>Rotation is immediate and global.</strong> The old key stops working the moment you rotate, breaking any other tool reading this bucket in the same instant. Cisco also <em>requires</em> rotation every 90 days — an un-rotated key loses access even though Umbrella keeps writing data.</div>
+        </div></li>
+        <li><input type="checkbox" class="tick" id="s1d"><div>
+          <label class="step-title" for="s1d">Note your log schema version</label>
+          <p>Same page, <em>View your log schema version and last sync time</em>. The collector ships column layouts for <strong>v13</strong>. An older org, or a future bump, means columns sit in different positions — fixable in Phase 04 without touching code.</p>
+        </div></li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- ============ 2 ============ -->
+  <section class="phase" id="p2">
+    <div class="phase-head">
+      <div class="phase-num">02</div>
+      <div>
+        <h2>Upload the integration<span class="console xsiam">XSIAM</span></h2>
+        <p class="phase-sub">A single YAML carries both the configuration screen and the Python. There is nothing to install from the Marketplace.</p>
+      </div>
+    </div>
+    <div class="phase-body">
+      <ol class="steps">
+        <li><input type="checkbox" class="tick" id="s2a"><div>
+          <label class="step-title" for="s2a">Go to <span class="path">Settings ⚙ → Data Sources &amp; Integrations</span> → <strong>+ Add New</strong> → <strong>Create Integration</strong></label>
+          <p>Two routes appear: <em>Import File</em> (drag the YAML in) and <em>Create from Template</em> (the built-in code editor). Older tenants put the same thing under <span class="path">Configurations → Automation &amp; Feed Integrations</span>.</p>
+        </div></li>
+        <li><input type="checkbox" class="tick" id="s2b"><div>
+          <label class="step-title" for="s2b">Import <code>CiscoUmbrellaS3EventCollector.yml</code></label>
+          <p>Re-importing the same file later is how you ship code changes — it overwrites in place and keeps existing instances and their cursors.</p>
+          <div class="note warn"><strong>The YAML must be built, not hand-edited.</strong> The build script strips the three <code>import demistomock</code> / <code>CommonServerPython</code> lines before embedding the code, exactly as <code>demisto-sdk unify</code> does. XSIAM injects those bindings around your script at runtime and there is no <code>demistomock</code> package in the container, so a YAML that still contains that import fails on Test with <code>ModuleNotFoundError: No module named 'demistomock'</code>.</div>
+          <div class="note">Adding a <strong>required</strong> parameter to an integration that already has instances breaks the import: XSIAM re-initialises every instance against the new schema and fails on the missing value. If you extend this integration, add new fields as optional and validate them in code.</div>
+        </div></li>
+        <li><input type="checkbox" class="tick" id="s2c"><div>
+          <label class="step-title" for="s2c">Confirm it registered</label>
+          <p>Search the list for <strong>Cisco Umbrella S3 Event Collector</strong>. It should show as custom content with no instances yet.</p>
+        </div></li>
+      </ol>
+      <div class="note" style="margin-top:18px;">Don't install the Marketplace pack <em>Cisco Umbrella cloud security</em> alongside this. It's built for the S3-plus-SQS route and its parsing rule expects raw CSV lines; this collector sends structured JSON to a separate dataset precisely to stay out of its way.</div>
+    </div>
+  </section>
+
+  <!-- ============ 2b ============ -->
+  <section class="phase" id="p2b">
+    <div class="phase-head">
+      <div class="phase-num">02<span style="font-size:20px">b</span></div>
+      <div>
+        <h2>Create the HTTP Collector<span class="console xsiam">XSIAM</span></h2>
+        <p class="phase-sub">The receiving end. It must exist before the instance is configured, because the instance needs its URL and key.</p>
+      </div>
+    </div>
+    <div class="phase-body">
+      <ol class="steps">
+        <li><input type="checkbox" class="tick" id="s2ba"><div>
+          <label class="step-title" for="s2ba">Add a custom HTTP collector with exactly these settings</label>
+          <p><span class="path">Settings → Data Sources &amp; Integrations → + Add New</span>, choose the custom / HTTP option.</p>
+          <div class="scroll"><table>
+            <thead><tr><th>Field</th><th>Value</th><th>Why</th></tr></thead>
+            <tbody>
+              <tr><td class="k">Name</td><td class="v">cisco-umbrella-s3</td><td>Free text — only a label in the data-source list.</td></tr>
+              <tr><td class="k">Compression</td><td class="v">gzip</td><td>The integration gzips every batch and sends <code>Content-Encoding: gzip</code>. A mismatch fails with <code>gzip compression error (invalid header)</code>.</td></tr>
+              <tr><td class="k">Log Format</td><td class="v">JSON</td><td>Each batch is newline-delimited JSON — one flat object per line, one event per object.</td></tr>
+              <tr><td class="k">Vendor</td><td class="v">cisco</td><td rowspan="2">Together these name the dataset <code>cisco_umbrella_s3_raw</code>. Change either one and the data model rule and every query here point at a dataset that never fills.</td></tr>
+              <tr><td class="k">Product</td><td class="v">umbrella_s3</td></tr>
+            </tbody>
+          </table></div>
+          <p>If your collector already exists as <em>uncompressed</em>, don't recreate it — tick <em>Send uncompressed</em> in the instance's advanced settings instead.</p>
+        </div></li>
+        <li><input type="checkbox" class="tick" id="s2bb"><div>
+          <label class="step-title" for="s2bb">Copy the URL and the API key together</label>
+          <p>The URL looks like <code>https://api-&lt;tenant&gt;.xdr.&lt;region&gt;.paloaltonetworks.com/logs/v1/event</code>. The key is shown <strong>once</strong> — if it's lost, delete the collector and make a new one. They are a matched pair; a URL from one collector and a key from another returns 401.</p>
+        </div></li>
+        <li><input type="checkbox" class="tick" id="s2bc"><div>
+          <label class="step-title" for="s2bc">Prove the collector works before wiring anything to it</label>
+          <p>This sends one row in exactly the shape the integration uses — same gzip, same NDJSON, same headers.</p>
+          <div class="code"><span class="cap">shell · one test event</span><button class="copy">Copy</button><pre>URL='https://api-&lt;tenant&gt;.xdr.&lt;region&gt;.paloaltonetworks.com/logs/v1/event'
+KEY='&lt;collector api key&gt;'
+
+printf '%s\n' '{"source_log_type":"collector-test","domain":"test.invalid"}' \
+  | gzip \
+  | curl -sS -i -X POST "$URL" \
+      -H "Authorization: $KEY" \
+      -H "Content-Type: application/json" \
+      -H "Content-Encoding: gzip" \
+      --data-binary @-</pre></div>
+          <p>Expect <code>200</code>. A <code>401</code>/<code>403</code> means the key is wrong or mismatched with the URL; a <code>400</code> or a gzip error means Compression or Log Format doesn't match what you sent.</p>
+          <div class="note">No shell to hand? Postman works, without gzip: same URL, <code>Authorization</code> and <code>Content-Type: application/json</code> headers, raw JSON body, no <code>Content-Encoding</code>. Then <strong>400 or a gzip error means the key is good</strong> — the collector authenticated you and only rejected the format. Only 401 points at the credential.</div>
+        </div></li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- ============ 3 ============ -->
+  <section class="phase" id="p3">
+    <div class="phase-head">
+      <div class="phase-num">03</div>
+      <div>
+        <h2>Configure the instance<span class="console xsiam">XSIAM</span></h2>
+        <p class="phase-sub">One instance per Umbrella org. The screen mixes this integration's own settings with platform fields XSIAM shows on every integration — most of the latter do nothing here.</p>
+      </div>
+    </div>
+    <div class="phase-body">
+
+      <h3>Settings this integration defines</h3>
+      <div class="scroll"><table>
+        <thead><tr><th>Field</th><th>Default</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr><td class="k">S3 bucket</td><td class="v">cisco-managed-us-west-1</td><td>The Cisco-managed bucket from Umbrella Log Management. Other regions exist, e.g. <code>cisco-managed-eu-west-1</code>.</td></tr>
+          <tr><td class="k">Bucket prefix</td><td class="v"><em style="font-family:var(--body)">required</em></td><td>Your org folder, <code>&lt;orgid&gt;_&lt;40-char hash&gt;</code>. No <code>s3://</code>, no slashes.</td></tr>
+          <tr><td class="k">AWS region</td><td class="v"><em style="font-family:var(--body)">derived</em></td><td>Blank means take it from the bucket name. Set it only if your bucket name doesn't carry the region.</td></tr>
+          <tr><td class="k">Access key / secret</td><td class="v"><em style="font-family:var(--body)">required</em></td><td>From Umbrella. Secret is exactly 40 characters.</td></tr>
+          <tr><td class="k">HTTP Collector URL</td><td class="v"><em style="font-family:var(--body)">required</em></td><td>From Phase 02b. Must end <code>/logs/v1/event</code>. Optional in the schema so that importing an updated YAML never breaks an existing instance — but nothing sends without it.</td></tr>
+          <tr><td class="k">HTTP Collector API key</td><td class="v"><em style="font-family:var(--body)">required</em></td><td>The key from the same collector as the URL above.</td></tr>
+          <tr><td class="k">Log types</td><td class="v">auto</td><td><code>auto</code> discovers every folder under your prefix — right for a first run, and it adapts to any licence. Pin the list explicitly for production so a newly licensed log type can't start ingesting unnoticed.</td></tr>
+          <tr><td class="k">First fetch time</td><td class="v">3 days</td><td>How far back the first run starts; ignored afterwards. Cannot exceed bucket retention. This is how much history you ingest and pay for.</td></tr>
+          <tr><td class="k">Max objects per fetch</td><td class="v">100</td><td>Per log type. Umbrella writes ~144 files/day/type, so 100 is ample steady-state. Raise to 500–1000 while backfilling.</td></tr>
+          <tr><td class="k">Max events per fetch</td><td class="v">200000</td><td>Per log type. Usually the <em>real</em> throttle — one busy DNS file holds tens of thousands of rows, so this stops the run long before the file count does. Raise both together.</td></tr>
+          <tr><td class="k">Max run time (seconds)</td><td class="v">240</td><td>The collector stops cleanly here and resumes next run, instead of being killed by the container timeout (which leaves the instance red). Keep below your tenant script timeout.</td></tr>
+          <tr><td class="k">Column overrides (JSON)</td><td class="v"><em style="font-family:var(--body)">empty</em></td><td>Override the CSV column order per log type when Cisco bumps the schema. Position 1 names column 1.</td></tr>
+          <tr><td class="k">Send uncompressed</td><td class="v">off</td><td>Only if the HTTP Collector was created with Compression = uncompressed.</td></tr>
+          <tr><td class="k">Trust any certificate</td><td class="v">off</td><td>Standard TLS bypass. Leave off.</td></tr>
+          <tr><td class="k">Use system proxy settings</td><td class="v">off</td><td>Tick if the engine reaches AWS through a proxy.</td></tr>
+        </tbody>
+      </table></div>
+
+      <h3>Platform fields XSIAM shows on every integration</h3>
+      <p>These belong to the platform, not to this integration. The screen renders them whether or not they apply, which is a common source of confusion.</p>
+      <div class="scroll"><table>
+        <thead><tr><th>Field</th><th>Set it to</th><th>Why</th></tr></thead>
+        <tbody>
+          <tr><td class="k">Fetch events</td><td class="v">✔ on</td><td><strong>The one that matters.</strong> Without it the integration loads but never runs on a timer — Test passes, nothing ingests.</td></tr>
+          <tr><td class="k">Events fetch interval</td><td class="v">5–10 min</td><td>Umbrella writes every ~10 minutes, so anything under 5 buys nothing. A new run cannot start while the previous is still going, so long runs effectively serialise.</td></tr>
+          <tr><td class="k">Fetch incidents / Fetch issues</td><td class="v">off</td><td>For integrations that create cases from alerts. This is an event collector — it writes to a dataset, it does not raise issues. Leave off or it will simply do nothing.</td></tr>
+          <tr><td class="k">Fetch indicators</td><td class="v">off</td><td>For threat-intel feeds populating the indicator store. Not applicable.</td></tr>
+          <tr><td class="k">Classifier / Mapper / Incident type</td><td class="v">none</td><td>These shape fetched <em>incidents</em> into case fields. With no incidents fetched they are inert. Normalisation here happens in the data model rule instead (Phase 06).</td></tr>
+          <tr><td class="k">Run on</td><td class="v">tenant / default</td><td>Where the container executes. Pick an engine only if policy requires the AWS call to leave from your network — and then tick the proxy option if that engine needs one.</td></tr>
+          <tr><td class="k">Log level</td><td class="v">Debug while installing</td><td>Debug prints the per-run lines you need — how many objects were listed, how many events sent. Drop it back afterwards.</td></tr>
+          <tr><td class="k">Instance name</td><td class="v">e.g. umbrella-s3-prod</td><td>Identifies it in logs and health views. One per Umbrella org.</td></tr>
+          <tr><td class="k">Do not use by default</td><td class="v">off</td><td>Marks an instance as on-demand only for playbook commands. Irrelevant to fetching.</td></tr>
+          <tr><td class="k">Single engine / Engine group</td><td class="v">none</td><td>Only relevant when running on engines.</td></tr>
+        </tbody>
+      </table></div>
+
+      <ol class="steps" style="margin-top:22px;">
+        <li><input type="checkbox" class="tick" id="s3c"><div>
+          <label class="step-title" for="s3c">Click <strong>Test</strong>, then Save</label>
+          <p>A pass means the credentials work and at least one log folder exists under your prefix. It does <em>not</em> prove the HTTP Collector settings are right — that comes in Phase 05. Anything else is in the <a href="#tr">troubleshooting table</a>.</p>
+        </div></li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- ============ 4 ============ -->
+  <section class="phase" id="p4">
+    <div class="phase-head">
+      <div class="phase-num">04</div>
+      <div>
+        <h2>Discover your log types and check the columns<span class="console xsiam">XSIAM</span></h2>
+        <p class="phase-sub">The sample command reads real objects without pushing anything or moving the cursor — the safe way to see what you have and confirm the layout matches.</p>
+      </div>
+    </div>
+    <div class="phase-body">
+      <ol class="steps">
+        <li><input type="checkbox" class="tick" id="s4a"><div>
+          <label class="step-title" for="s4a">List what actually exists under your prefix</label>
+          <div class="code"><span class="cap">command · discover and sample every folder</span><button class="copy">Copy</button><pre>!cisco-umbrella-s3-get-events log_type=auto limit=1</pre></div>
+          <p>This is your licence inventory: whatever folders come back are what Umbrella is writing for your org. Write the list down — Phase 06 needs it. The debug log also prints <code>Discovered log types: [...]</code>.</p>
+        </div></li>
+        <li><input type="checkbox" class="tick" id="s4b"><div>
+          <label class="step-title" for="s4b">Check the fields landed in the right places</label>
+          <div class="code"><span class="cap">command · sample one log type</span><button class="copy">Copy</button><pre>!cisco-umbrella-s3-get-events log_type=dnslogs limit=1</pre></div>
+          <p>For <code>dnslogs</code>: <code>domain</code> should hold a domain, <code>action</code> should read <code>Allowed</code> or <code>Blocked</code>, <code>categories</code> should look like categories rather than an IP. For <code>proxylogs</code>, <code>url</code> should hold a URL. Trailing <code>col_16</code>, <code>col_17</code>… fields are the safety net firing: your schema has more columns than the built-in layout and nothing was dropped.</p>
+          <div class="note">Sample <code>dnslogs</code> rather than <code>auditlogs</code> when you can. Audit logs are written only when an administrator changes something, so a quiet org returns <em>No entries</em> — which looks like a fault and isn't one. DNS files arrive every 10 minutes without fail.</div>
+        </div></li>
+        <li><input type="checkbox" class="tick" id="s4c"><div>
+          <label class="step-title" for="s4c">If the columns are shifted, name them — don't edit code</label>
+          <p>Put the correct order into <em>Column overrides (JSON)</em> on the instance. It replaces the built-in layout for that log type only.</p>
+          <div class="code"><span class="cap">instance parameter · column overrides</span><button class="copy">Copy</button><pre>{
+  "dnslogs": [
+    "timestamp", "policy_identity", "identities", "internal_ip",
+    "external_ip", "action", "query_type", "response_code", "domain",
+    "categories", "policy_identity_type", "identity_types",
+    "blocked_categories", "rule_id", "destination_country", "org_id"
+  ]
+}</pre></div>
+        </div></li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- ============ 5 ============ -->
+  <section class="phase" id="p5">
+    <div class="phase-head">
+      <div class="phase-num">05</div>
+      <div>
+        <h2>Let it fetch, then find the dataset<span class="console xsiam">XSIAM</span></h2>
+        <p class="phase-sub">The dataset is created by the HTTP Collector on its first accepted batch. It does not exist before then — which is why the data model rule comes after this phase, not before.</p>
+      </div>
+    </div>
+    <div class="phase-body">
+      <ol class="steps">
+        <li><input type="checkbox" class="tick" id="s5a"><div>
+          <label class="step-title" for="s5a">Force one push rather than waiting for the timer</label>
+          <div class="code"><span class="cap">command · read one file and actually send it</span><button class="copy">Copy</button><pre>!cisco-umbrella-s3-get-events log_type=dnslogs limit=1 should_push_events=true</pre></div>
+          <p>This is the fastest end-to-end proof: S3 read, parse, POST, dataset creation, all in one call.</p>
+        </div></li>
+        <li><input type="checkbox" class="tick" id="s5b"><div>
+          <label class="step-title" for="s5b">Confirm rows landed</label>
+          <div class="code"><span class="cap">XQL · did anything arrive</span><button class="copy">Copy</button><pre>dataset = cisco_umbrella_s3_raw
+| comp count() as events by source_log_type</pre></div>
+          <p>Widen the time picker if it looks empty — with <code>first_fetch = 3 days</code> the first rows are backdated. A query against a dataset that has never received data returns nothing rather than an error, so an empty result doesn't distinguish "no data yet" from "wrong dataset name" — the collector's own row under Data Sources settles that.</p>
+        </div></li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- ============ 6 ============ -->
+  <section class="phase" id="p6">
+    <div class="phase-head">
+      <div class="phase-num">06</div>
+      <div>
+        <h2>Add the data model rule<span class="console xsiam">XSIAM</span></h2>
+        <p class="phase-sub">Optional but valuable: maps Umbrella fields onto XDM so this data joins your other sources in one query. Everything stays searchable without it.</p>
+      </div>
+    </div>
+    <div class="phase-body">
+      <ol class="steps">
+        <li><input type="checkbox" class="tick" id="s6a"><div>
+          <label class="step-title" for="s6a">Open <span class="path">Settings → Configurations → Data Management → Data Model Rules</span>, <strong>User Defined</strong> tab</label>
+          <p>This is <strong>one shared editor holding every user-defined rule in the tenant</strong> — there is no per-rule Add button and no schema upload. Scroll to the bottom, leave a blank line, and paste from <code>CiscoUmbrellaS3ModelingRules.xif</code>.</p>
+          <div class="note warn"><strong>Copy the editor's existing contents out first.</strong> It holds other teams' rules, and validation runs across the whole document — one bad field in your block blocks saving <em>everyone's</em>. Select all, paste into a local file, and you have a rollback.</div>
+        </div></li>
+        <li><input type="checkbox" class="tick" id="s6b"><div>
+          <label class="step-title" for="s6b">Enable only the blocks for log types you actually ingest</label>
+          <p>The file has a block per log type; the DNS block is live and the rest are commented. Uncomment the ones matching the folders Phase 04 found.</p>
+          <div class="note warn"><strong>Two independent validators will reject a rule.</strong> First, a field must exist in <em>your dataset</em> — a proxy block on a DNS-only org fails with <code>Data Model validation error - unknown field url</code>. Second, an XDM field must exist in <em>your tenant's XDM version</em>, which differs between tenants: <code>xdm.source.nat.ipv4 is not part of the selected data model</code>. The rule editor autocompletes after you type <code>xdm.</code>, and that list is authoritative — trust it over this guide.</div>
+          <p>Each block keeps a conservative core live and lists richer fields in an EXTRAS comment. Move those up one at a time, saving after each.</p>
+        </div></li>
+        <li><input type="checkbox" class="tick" id="s6c"><div>
+          <label class="step-title" for="s6c">Verify the mapping resolves</label>
+          <div class="code"><span class="cap">XQL · blocked DNS through the data model</span><button class="copy">Copy</button><pre>datamodel dataset = cisco_umbrella_s3_raw
+| filter xdm.event.type = "dns-request"
+    and xdm.event.outcome = XDM_CONST.OUTCOME_FAILED
+| fields _time, xdm.source.host.hostname, xdm.source.user.username,
+         xdm.network.dns.dns_question.name, xdm.event.description
+| limit 50</pre></div>
+          <p>Empty columns point at the mapping, not the collector — compare against the raw row for the same <code>s3_key</code> to see which side is missing the value.</p>
+        </div></li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- ============ 7 ============ -->
+  <section class="phase" id="p7">
+    <div class="phase-head">
+      <div class="phase-num">07</div>
+      <div>
+        <h2>Decide about DNS logs<span class="console xsiam">XSIAM</span></h2>
+        <p class="phase-sub">Every other log type is modest. This is the one that needs a number attached before you commit.</p>
+      </div>
+    </div>
+    <div class="phase-body">
+      <ol class="steps">
+        <li><input type="checkbox" class="tick" id="s7a"><div>
+          <label class="step-title" for="s7a">Size it from the bucket before ingesting a byte</label>
+          <p>One call against a full day of objects gives the compressed total; XSIAM bills on the uncompressed volume, and gzipped Umbrella CSV typically expands 8–12×.</p>
+          <div class="code"><span class="cap">shell · one day of DNS logs, compressed</span><button class="copy">Copy</button><pre>aws s3 ls --summarize --recursive --human-readable \
+  s3://cisco-managed-us-west-1/&lt;your-prefix&gt;/dnslogs/2026-08-28/ \
+  --region us-west-1 | tail -3</pre></div>
+          <p>Multiply by ~10 and check against your licence headroom. If it lands somewhere uncomfortable, the lever is keeping only security-relevant rows — blocked verdicts are a small fraction of DNS traffic.</p>
+        </div></li>
+        <li><input type="checkbox" class="tick" id="s7b"><div>
+          <label class="step-title" for="s7b">Backfill deliberately, then put the throttles back</label>
+          <p>For a catch-up: max objects 1000, max events 2000000, interval 1 minute. Afterwards: 100, 200000, 5–10 minutes. Left high, a long stall becomes one enormous burst.</p>
+          <p>Raising the file limit alone usually changes nothing — the event cap is what stops the run. Raise both.</p>
+        </div></li>
+        <li><input type="checkbox" class="tick" id="s7c"><div>
+          <label class="step-title" for="s7c">Know the ceiling</label>
+          <p>This is one Python process per run: download, gunzip, parse, POST. If sustained DNS volume outgrows it, the same listing logic runs as a container job posting to the same HTTP Collector — still no SQS, but it parallelises across processes.</p>
+        </div></li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- ============ 8 ============ -->
+  <section class="phase" id="p8">
+    <div class="phase-head">
+      <div class="phase-num">08</div>
+      <div>
+        <h2>Alert on silence<span class="console xsiam">XSIAM</span></h2>
+        <p class="phase-sub">A polling collector fails quietly: no queue backs up, nothing errors downstream, the data just stops.</p>
+      </div>
+    </div>
+    <div class="phase-body">
+      <ol class="steps">
+        <li><input type="checkbox" class="tick" id="s8a"><div>
+          <label class="step-title" for="s8a">Schedule the freshness query</label>
+          <div class="code"><span class="cap">XQL · minutes behind, per log type</span><button class="copy">Copy</button><pre>dataset = cisco_umbrella_s3_raw
+| comp max(_time) as newest by source_log_type
+| alter minutes_behind = divide(
+    subtract(to_epoch(current_time(), "SECONDS"),
+             to_epoch(newest, "SECONDS")), 60)
+| filter minutes_behind > 45</pre></div>
+          <p>Healthy is under ~20 minutes. Wire it into a scheduled correlation rule so a returned row raises an alert. Exclude <code>auditlogs</code> — it is legitimately quiet for hours.</p>
+        </div></li>
+        <li><input type="checkbox" class="tick" id="s8b"><div>
+          <label class="step-title" for="s8b">Watch the collector row, not the integration row</label>
+          <p>Under Data Sources, the <strong>HTTP Collector</strong> shows the real received count. The integration's own "Count Received" column stays empty by design: because a custom integration can't use the platform's event API, it never registers as an ingestion source. The collector row is your monitoring signal.</p>
+        </div></li>
+        <li><input type="checkbox" class="tick" id="s8c"><div>
+          <label class="step-title" for="s8c">Diarise the 90-day key rotation</label>
+          <p>Cisco requires it, and an un-rotated key loses bucket access while Umbrella keeps writing. Update the instance in the same change window. Retention is the safety net: fix it inside your window, widen <em>First fetch</em>, and nothing is lost.</p>
+        </div></li>
+        <li><input type="checkbox" class="tick" id="s8d"><div>
+          <label class="step-title" for="s8d">Know how to stop it</label>
+          <p>Untick <em>Fetch events</em> to pause; the cursor is kept, so re-enabling resumes where it left off (within retention). Deleting the instance discards the cursor but leaves the dataset and everything ingested intact.</p>
+        </div></li>
+      </ol>
+    </div>
+  </section>
+
+  <!-- ============ troubleshooting ============ -->
+  <section class="phase" id="tr">
+    <div class="phase-head">
+      <div class="phase-num">✕</div>
+      <div>
+        <h2>When it doesn't work</h2>
+        <p class="phase-sub">Errors surface on the instance's Test button and in the integration log. Use <strong>Run Test &amp; Download Debug Log</strong> rather than plain Test — it shows whether a container started, which image, and the full request.</p>
+      </div>
+    </div>
+    <div class="phase-body">
+      <div class="scroll"><table>
+        <thead><tr><th>What you see</th><th>What it means</th><th>Fix</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="sym">ModuleNotFoundError: No module named 'demistomock'</td>
+            <td>The YAML still contains the local-dev import lines. XSIAM injects those bindings at runtime; the package doesn't exist in the container.</td>
+            <td>Rebuild the YAML with the supplied build script, which strips them. Never hand-edit the embedded code.</td>
+          </tr>
+          <tr>
+            <td class="sym">getLicenseCustomField is only available for system content</td>
+            <td>Something called <code>send_events_to_xsiam()</code>, which is restricted to system content.</td>
+            <td>Use the HTTP Collector path — fill in the collector URL and key on the instance (Phase 02b).</td>
+          </tr>
+          <tr>
+            <td class="sym">SignatureDoesNotMatch</td>
+            <td>The AWS secret doesn't match the key. If the debug log shows AWS echoing back an identical StringToSign, every other input is correct and only the secret is wrong.</td>
+            <td>Check the secret is exactly 40 characters — a clipped paste is the usual cause. Re-enter it; clear the field first so the change registers.</td>
+          </tr>
+          <tr>
+            <td class="sym">InvalidAccessKeyId</td>
+            <td>The key ID doesn't exist — rotated in Umbrella, or past the 90-day limit.</td>
+            <td>Regenerate at Admin → Log Management and update the instance.</td>
+          </tr>
+          <tr>
+            <td class="sym">AccessDenied</td>
+            <td>Credentials valid but not for this path — wrong prefix, a leading slash, or keys from a different Umbrella org.</td>
+            <td>Prefix must be exactly the org folder, no <code>s3://</code>, no slashes.</td>
+          </tr>
+          <tr>
+            <td class="sym">Connected, but no log folders were found</td>
+            <td>Credentials and bucket are right; the prefix has nothing under it.</td>
+            <td>Check the prefix, or give Umbrella an upload cycle (~10 min) if logging was just enabled.</td>
+          </tr>
+          <tr>
+            <td class="sym">HTTP Collector rejected the batch. HTTP 401</td>
+            <td>Collector key wrong, or URL and key from different collectors.</td>
+            <td>The error reports the stored key's length and first/last characters — compare against the collector. Recreate and copy both together if unsure.</td>
+          </tr>
+          <tr>
+            <td class="sym">gzip compression error (invalid header)</td>
+            <td>The collector's Compression setting doesn't match what was sent.</td>
+            <td>Set the collector to gzip, or tick <em>Send uncompressed</em> on the instance.</td>
+          </tr>
+          <tr>
+            <td class="sym">Timeout Error: Docker code script failed due to timeout</td>
+            <td>The run exceeded the container limit. Nothing is lost — state commits per push — but the instance shows red and Last Communication stops updating, because only a clean finish counts.</td>
+            <td>Lower <em>Max run time per fetch</em> below the tenant timeout, or reduce the event cap. Status clears on the next successful run.</td>
+          </tr>
+          <tr>
+            <td class="sym">Test passes, no events arrive</td>
+            <td><em>Fetch events</em> unticked, the collector URL/key blank, or the selected log types don't exist for this org.</td>
+            <td>Set Log types to <code>auto</code> for one cycle to see what's really there, then pin the list.</td>
+          </tr>
+          <tr>
+            <td class="sym">Data Model validation error - unknown field X</td>
+            <td>The rule references a field your dataset has never received — usually a block for a log type you don't ingest.</td>
+            <td>Comment that block out. Enable blocks only for folders Phase 04 found.</td>
+          </tr>
+          <tr>
+            <td class="sym">xdm.… is not part of the selected data model</td>
+            <td>That XDM field doesn't exist in your tenant's XDM version.</td>
+            <td>Remove the line; use the editor's autocomplete to find the equivalent that does exist.</td>
+          </tr>
+          <tr>
+            <td class="sym">Every field named col_0, col_1…</td>
+            <td>A log folder with no built-in layout, or a schema mismatch.</td>
+            <td>Add its column names under <em>Column overrides (JSON)</em>; the data is already being kept.</td>
+          </tr>
+          <tr>
+            <td class="sym">Duplicate rows after an outage</td>
+            <td>Expected, and bounded: state is written after every push, so only the objects in the failed push replay.</td>
+            <td>Dedupe on <code>s3_key</code> plus the row if exactness matters.</td>
+          </tr>
+          <tr>
+            <td class="sym">Counts lower than the bucket</td>
+            <td>An unreadable object was skipped so it couldn't stall the queue.</td>
+            <td>Search the integration log for <code>failed to read</code> — it names the key.</td>
+          </tr>
+          <tr>
+            <td class="sym">Docker image pull failure</td>
+            <td>The tenant restricts images and <code>demisto/boto3py3</code> isn't approved.</td>
+            <td>Have it allowed, or pin the <code>dockerimage</code> to a tag an existing AWS integration already uses.</td>
+          </tr>
+        </tbody>
+      </table></div>
+
+      <h3>Reading the debug log</h3>
+      <p>With Log level on Debug, each run prints the two lines that answer most questions:</p>
+      <div class="code"><span class="cap">integration log</span><button class="copy">Copy</button><pre>[dnslogs] listed 37 object(s) after &lt;prefix&gt;/dnslogs/2026-08-29/2026-08-29-04-30-
+Sent 412,880 events to the HTTP Collector.</pre></div>
+      <p>Zero on the first line means log types or the time window. A number on the first and zero on the second means parsing produced nothing. If the marker in that line is <em>identical across consecutive runs</em>, the run is dying before its first push completes and is redoing the same work — drop the object limit until one push lands.</p>
+    </div>
+  </section>
+
+  <!-- ============ XQL library ============ -->
+  <section class="phase" id="xql">
+    <div class="phase-head">
+      <div class="phase-num">≡</div>
+      <div>
+        <h2>XQL library</h2>
+        <p class="phase-sub">Queries for testing, monitoring and getting value out of the data. XQL is Cortex's query language; run these under Investigation → Query Builder / XQL Search.</p>
+      </div>
+    </div>
+    <div class="phase-body">
+
+      <h3>Is it working</h3>
+      <div class="code"><span class="cap">volume by log type</span><button class="copy">Copy</button><pre>dataset = cisco_umbrella_s3_raw
+| comp count() as events by source_log_type</pre></div>
+
+      <div class="code"><span class="cap">freshness — how far behind each type is</span><button class="copy">Copy</button><pre>dataset = cisco_umbrella_s3_raw
+| comp max(_time) as newest by source_log_type
+| alter minutes_behind = divide(
+    subtract(to_epoch(current_time(), "SECONDS"),
+             to_epoch(newest, "SECONDS")), 60)</pre></div>
+
+      <div class="code"><span class="cap">ingestion rate per hour — is the backfill converging</span><button class="copy">Copy</button><pre>dataset = cisco_umbrella_s3_raw
+| alter hour = format_timestamp("%Y-%m-%d %H:00", _time)
+| comp count() as events by hour, source_log_type
+| sort desc hour</pre></div>
+
+      <div class="code"><span class="cap">which S3 objects have been ingested</span><button class="copy">Copy</button><pre>dataset = cisco_umbrella_s3_raw
+| comp count() as rows by s3_key
+| sort desc rows
+| limit 50</pre></div>
+
+      <div class="code"><span class="cap">find the collector smoke-test row</span><button class="copy">Copy</button><pre>dataset = cisco_umbrella_s3_raw
+| filter source_log_type = "collector-test"</pre></div>
+
+      <div class="code"><span class="cap">unparsed columns — schema drift detector</span><button class="copy">Copy</button><pre>dataset = cisco_umbrella_s3_raw
+| filter col_16 != null or col_17 != null
+| comp count() as rows by source_log_type
+| limit 20</pre></div>
+
+      <div class="code"><span class="cap">duplicate check after an outage</span><button class="copy">Copy</button><pre>dataset = cisco_umbrella_s3_raw
+| comp count() as copies by s3_key, _time, domain
+| filter copies > 1
+| limit 50</pre></div>
+
+      <h3>Sizing and cost</h3>
+      <div class="code"><span class="cap">events in the last 24h, by type</span><button class="copy">Copy</button><pre>dataset = cisco_umbrella_s3_raw
+| filter _time > to_timestamp(subtract(to_epoch(current_time(), "SECONDS"), 86400), "SECONDS")
+| comp count() as events by source_log_type</pre></div>
+
+      <div class="code"><span class="cap">what share of DNS is actually blocked</span><button class="copy">Copy</button><pre>dataset = cisco_umbrella_s3_raw
+| filter source_log_type = "dnslogs"
+| comp count() as events by action</pre></div>
+
+      <h3>Throughput and tuning</h3>
+      <p>Two different clocks live in every row. <code>_time</code> is when the DNS query or web request actually happened; <code>_insert_time</code> is when XSIAM received it. During a backfill they can be days apart — so measure <strong>ingest rate</strong> against <code>_insert_time</code>, and <strong>coverage</strong> against <code>_time</code>. Charting the wrong one is the classic way to conclude the collector is broken when it is merely catching up.</p>
+
+      <div class="code"><span class="cap">ingest rate per minute — set the time picker to Last 1 hour, then chart it</span><button class="copy">Copy</button><pre>dataset = cisco_umbrella_s3_raw
+| bin _insert_time span=1m
+| comp count() as events by _insert_time, source_log_type
+| sort desc _insert_time</pre></div>
+      <p>Run it, then switch the result pane from Table to a line or column chart — <code>_insert_time</code> on the x-axis, <code>events</code> on the y, split by <code>source_log_type</code>. <em>Save to dashboard</em> turns it into a widget. If your tenant's XQL doesn't offer <code>bin</code>, group on a formatted string instead: <code>| alter minute = format_timestamp("%H:%M", _insert_time)</code> then <code>| comp count() as events by minute</code>.</p>
+
+      <div class="code"><span class="cap">files ingested per minute — how many S3 objects a run actually gets through</span><button class="copy">Copy</button><pre>dataset = cisco_umbrella_s3_raw
+| bin _insert_time span=1m
+| comp count_distinct(s3_key) as files by _insert_time
+| sort desc _insert_time</pre></div>
+
+      <div class="code"><span class="cap">the two numbers that size every other setting</span><button class="copy">Copy</button><pre>dataset = cisco_umbrella_s3_raw
+| bin _insert_time span=1m
+| comp count() as events by _insert_time
+| comp avg(events) as avg_per_min, max(events) as peak_per_min</pre></div>
+
+      <div class="code"><span class="cap">rows per S3 object — why the file limit is rarely the throttle</span><button class="copy">Copy</button><pre>dataset = cisco_umbrella_s3_raw
+| comp count() as rows by s3_key, source_log_type
+| comp avg(rows) as avg_rows, max(rows) as max_rows, count() as files by source_log_type</pre></div>
+
+      <div class="code"><span class="cap">how far behind real time the data is — backfill convergence</span><button class="copy">Copy</button><pre>dataset = cisco_umbrella_s3_raw
+| alter lag_min = divide(
+    subtract(to_epoch(_insert_time, "SECONDS"), to_epoch(_time, "SECONDS")), 60)
+| comp avg(lag_min) as avg_lag_min, max(lag_min) as worst_lag_min by source_log_type</pre></div>
+      <p>A steady lag means you are keeping pace. A lag that shrinks run over run means the backfill is converging; one that grows means the collector cannot keep up with what Umbrella is producing and the settings below need raising — or DNS needs filtering.</p>
+
+      <h4 style="font-family:var(--display);font-size:14px;margin:22px 0 8px;">Turning those numbers into settings</h4>
+      <div class="scroll"><table>
+        <thead><tr><th>Setting</th><th>Derive it from</th></tr></thead>
+        <tbody>
+          <tr><td class="k">Max run time</td><td>Start at 240s and keep it comfortably under the tenant script timeout. This is the governor; everything else follows from it.</td></tr>
+          <tr><td class="k">Max events per fetch</td><td><code>peak_per_min &times; (max run time / 60)</code>. Match the event cap to what the run can actually push in its budget, so the two limits agree instead of fighting. Below that, the cap wastes budget; far above it, the clock always wins and the cap is decoration.</td></tr>
+          <tr><td class="k">Max objects per fetch</td><td><code>max events per fetch / avg_rows</code>, rounded up. On DNS this usually lands well under 100, which is why raising the file limit alone changes nothing.</td></tr>
+          <tr><td class="k">Fetch interval</td><td>Steady state: 5–10 min (Umbrella writes every ~10). Backfill: 1 min — runs serialise anyway, since a new one cannot start while the previous is going.</td></tr>
+        </tbody>
+      </table></div>
+      <p>Worked example: if <code>peak_per_min</code> is 120,000 and <code>avg_rows</code> is 40,000, then a 240-second budget moves roughly 480,000 events — so set max events to ~500,000 and max objects to ~13. Anything higher just gets cut off by the clock.</p>
+
+      <h3>Security value — DNS</h3>
+      <div class="code"><span class="cap">blocked DNS by category and host</span><button class="copy">Copy</button><pre>dataset = cisco_umbrella_s3_raw
+| filter source_log_type = "dnslogs" and action = "Blocked"
+| comp count() as hits by policy_identity, categories, domain
+| sort desc hits
+| limit 100</pre></div>
+
+      <div class="code"><span class="cap">hosts hitting the most distinct blocked domains — beaconing / infection signal</span><button class="copy">Copy</button><pre>dataset = cisco_umbrella_s3_raw
+| filter source_log_type = "dnslogs" and action = "Blocked"
+| comp count_distinct(domain) as domains, count() as hits by policy_identity
+| filter domains > 10
+| sort desc domains</pre></div>
+
+      <div class="code"><span class="cap">lookups for a specific domain — incident pivot</span><button class="copy">Copy</button><pre>dataset = cisco_umbrella_s3_raw
+| filter source_log_type = "dnslogs" and domain ~= "suspicious-domain\.com"
+| fields _time, policy_identity, internal_ip, external_ip, action, categories
+| sort desc _time</pre></div>
+
+      <div class="code"><span class="cap">newly seen domains in the last hour</span><button class="copy">Copy</button><pre>dataset = cisco_umbrella_s3_raw
+| filter source_log_type = "dnslogs"
+| comp min(_time) as first_seen, count() as hits by domain
+| filter first_seen > to_timestamp(subtract(to_epoch(current_time(), "SECONDS"), 3600), "SECONDS")
+| sort desc hits</pre></div>
+
+      <h3>Security value — other licence tiers</h3>
+      <div class="code"><span class="cap">proxy: blocked URLs and malware verdicts</span><button class="copy">Copy</button><pre>dataset = cisco_umbrella_s3_raw
+| filter source_log_type = "proxylogs" and verdict = "BLOCKED"
+| fields _time, policy_identity, url, categories, amp_malware_name, sha256
+| sort desc _time
+| limit 100</pre></div>
+
+      <div class="code"><span class="cap">firewall: top blocked destinations</span><button class="copy">Copy</button><pre>dataset = cisco_umbrella_s3_raw
+| filter source_log_type in ("firewalllogs", "cloudfirewalllogs") and verdict = "BLOCK"
+| comp count() as blocks by destination_ip, destination_port, ip_protocol
+| sort desc blocks
+| limit 50</pre></div>
+
+      <div class="code"><span class="cap">IPS: signature hits by severity</span><button class="copy">Copy</button><pre>dataset = cisco_umbrella_s3_raw
+| filter source_log_type = "intrusionlogs"
+| comp count() as hits by severity, message, source_ip
+| sort desc hits</pre></div>
+
+      <div class="code"><span class="cap">DLP: rule matches and the files involved</span><button class="copy">Copy</button><pre>dataset = cisco_umbrella_s3_raw
+| filter source_log_type = "dlplogs"
+| fields _time, file_owner, file_name, rule_name, data_classification, action
+| sort desc _time</pre></div>
+
+      <div class="code"><span class="cap">audit: who changed what in Umbrella</span><button class="copy">Copy</button><pre>dataset = cisco_umbrella_s3_raw
+| filter source_log_type = "auditlogs"
+| fields _time, email, user, type, action, ip
+| sort desc _time</pre></div>
+
+      <h3>Through the data model</h3>
+      <div class="code"><span class="cap">every mapped field at once — checks the EXTRAS you enabled</span><button class="copy">Copy</button><pre>datamodel dataset = cisco_umbrella_s3_raw
+| fields _time, xdm.event.type, xdm.network.dns.dns_question.name,
+         xdm.event.description, xdm.event.operation_sub_type,
+         xdm.network.rule, xdm.source.user.identifier,
+         xdm.source.host.hostname, xdm.source.ipv4,
+         xdm.event.outcome, xdm.event.outcome_reason
+| sort desc _time
+| limit 50</pre></div>
+      <p>Run this after enabling anything from an EXTRAS comment. A column that stays empty means the field mapped but the source value is blank; a column that errors means the field doesn't exist in your tenant's XDM version. Four of these — <code>operation_sub_type</code>, <code>network.rule</code>, <code>source.user.identifier</code>, <code>outcome_reason</code> — come from the EXTRAS list, so this doubles as a one-shot check that what you uncommented is actually populating.</p>
+
+      <div class="code"><span class="cap">normalised view — joins other XDM sources</span><button class="copy">Copy</button><pre>datamodel dataset = cisco_umbrella_s3_raw
+| filter xdm.event.outcome = XDM_CONST.OUTCOME_FAILED
+| fields _time, xdm.observer.product, xdm.source.host.hostname,
+         xdm.source.user.username, xdm.network.dns.dns_question.name,
+         xdm.event.description
+| sort desc _time
+| limit 100</pre></div>
+      <p>Once mapped, the same filter shape works across every XDM-normalised source in the tenant — the point of doing Phase 06 at all.</p>
+    </div>
+  </section>
+
+  <footer>
+    Developed and maintained by <a href="https://github.com/italkcyber">iTalkCyber</a> ·
+    <a href="https://github.com/italkcyber/umbrella-xsiam-collector">source on GitHub</a><br>
+    Ticks are saved in this browser only — a scratchpad for one run-through, not shared state.
+    Reference: <a href="https://docs.umbrella.com/deployment-umbrella/docs/cisco-managed-s3-bucket">Cisco-managed S3 bucket</a> ·
+    <a href="https://docs.umbrella.com/deployment-umbrella/docs/log-formats-and-versioning">Umbrella log formats and versioning</a> ·
+    <a href="https://www.cisco.com/c/en/us/support/docs/security/secure-access/222844-verify-secure-access-and-umbrella-s3-buc.html">90-day key rotation</a> ·
+    <a href="https://xsoar.pan.dev/docs/integrations/event-collectors">XSIAM event collectors</a>
+  </footer>
+</div>
+
+<script>
+  (function () {
+    var KEY = "umbrella-s3-guide-v1";
+    var state = {};
+    try { state = JSON.parse(localStorage.getItem(KEY) || "{}"); } catch (e) { state = {}; }
+
+    var ticks = document.querySelectorAll(".tick");
+    ticks.forEach(function (box) {
+      if (state[box.id]) { box.checked = true; }
+      box.addEventListener("change", function () {
+        state[box.id] = box.checked;
+        try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) { /* private mode */ }
+      });
+    });
+
+    document.querySelectorAll(".copy").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var pre = btn.parentElement.querySelector("pre");
+        var done = function () {
+          btn.textContent = "Copied";
+          setTimeout(function () { btn.textContent = "Copy"; }, 1400);
+        };
+        if (navigator.clipboard) {
+          navigator.clipboard.writeText(pre.textContent).then(done, function () { btn.textContent = "Select it"; });
+        } else {
+          var r = document.createRange();
+          r.selectNodeContents(pre);
+          var sel = window.getSelection();
+          sel.removeAllRanges();
+          sel.addRange(r);
+          done();
+        }
+      });
+    });
+  })();
+</script>
+</body>
+</html>

@@ -1,0 +1,202 @@
+/*
+ * ============================================================================
+ *  Cisco Umbrella -> Cortex XSIAM : XDM modeling rules
+ *  Dataset: cisco_umbrella_s3_raw   (from the HTTP Collector's vendor/product)
+ * ============================================================================
+ *
+ *  Covers every Umbrella log type: DNS, Secure Web Gateway (proxy), Cloud
+ *  Delivered Firewall, IP, DLP, Intrusion (IPS) and Admin Audit.
+ *
+ *  ---------------------------------------------------------------------------
+ *  ENABLE ONLY THE BLOCKS YOU ACTUALLY INGEST. This is not optional tidiness:
+ *  XSIAM validates a rule against the fields the DATASET has really received, so
+ *  a block naming a field no event has carried is rejected outright -
+ *      Data Model validation error - unknown field url
+ *  and on the shared editor that failure blocks saving everyone's rules.
+ *
+ *  Phase 04 of the deployment guide tells you which folders exist under your prefix. A
+ *  DNS-only org has dnslogs (+ auditlogs); SWG adds proxylogs; CDFW adds
+ *  firewalllogs/cloudfirewalllogs; and so on. The DNS block is live below
+ *  because effectively every org has it - uncomment the rest as they apply.
+ *  ---------------------------------------------------------------------------
+ *
+ *  SECOND VALIDATOR, DIFFERENT RULE: every xdm.* field must also exist in YOUR
+ *  tenant's XDM version, which differs between tenants and releases -
+ *      xdm.source.nat.ipv4 is not part of the selected data model
+ *  Each block therefore keeps a conservative core live and lists richer fields
+ *  in an EXTRAS comment. Add those one at a time; the rule editor autocompletes
+ *  after you type "xdm." and that list is authoritative for your tenant - trust
+ *  it over this file.
+ *
+ *  NOTHING UNMAPPED IS LOST. Every Umbrella column is queryable on the raw
+ *  dataset regardless. XDM mapping buys cross-source correlation and
+ *  out-of-the-box detections, not searchability.
+ *
+ *  WHERE THIS GOES: Settings > Configurations > Data Management > Data Model
+ *  Rules > User Defined. That is ONE editor holding every user-defined rule in
+ *  the tenant. Copy its current contents to a local file first (your rollback),
+ *  then append this at the bottom and Save.
+ * ============================================================================
+ */
+
+[MODEL: dataset=cisco_umbrella_s3_raw, content_id="cisco_umbrella"]
+
+// ===========================================================================
+//  DNS logs - every Umbrella licence.  Folder: dnslogs/
+// ===========================================================================
+filter source_log_type = "dnslogs"
+| alter
+    xdm.observer.vendor = "Cisco",
+    xdm.observer.product = "Umbrella",
+    xdm.event.type = "dns-request",
+    xdm.network.dns.dns_question.name = domain,
+    xdm.source.ipv4 = internal_ip,
+    xdm.source.host.hostname = if(policy_identity_type ~= "Computers|Roaming|Network Device|Site|AnyConnect", policy_identity, null),
+    xdm.source.user.username = if(policy_identity_type ~= "AD Users|Users", policy_identity, null),
+    xdm.event.description = concat(action, " ", domain, " [", categories, "]"),
+    xdm.event.outcome = if(action = "Blocked", XDM_CONST.OUTCOME_FAILED, action = "Allowed", XDM_CONST.OUTCOME_SUCCESS, to_string(action));
+
+// EXTRAS for dnslogs - move one at a time into the block above.
+// The four marked (confirmed) have been verified populating in a live tenant:
+//     xdm.observer.type = "DNS Resolver",
+//     xdm.event.operation_sub_type = action,          (confirmed)
+//     xdm.network.dns.dns_question.type = query_type,
+//     xdm.network.dns.response_code = response_code,
+//     xdm.source.user.identifier = policy_identity,    (confirmed)
+//     xdm.event.outcome_reason = blocked_categories,   (confirmed)
+//     xdm.network.rule = rule_id,                      (confirmed)
+//     xdm.target.location.country = destination_country,
+
+
+// ===========================================================================
+//  PROXY / Secure Web Gateway logs - SIG or SWG licence.  Folder: proxylogs/
+// ===========================================================================
+// filter source_log_type = "proxylogs"
+// | alter
+//     xdm.observer.vendor = "Cisco",
+//     xdm.observer.product = "Umbrella",
+//     xdm.event.type = "http-request",
+//     xdm.target.url = url,
+//     xdm.network.http.method = request_method,
+//     xdm.network.http.response_code = to_string(status_code),
+//     xdm.source.user_agent = user_agent,
+//     xdm.source.ipv4 = internal_ip,
+//     xdm.target.ipv4 = destination_ip,
+//     xdm.source.host.hostname = if(policy_identity_type ~= "Computers|Roaming|Network Device|Site|AnyConnect", policy_identity, null),
+//     xdm.source.user.username = if(policy_identity_type ~= "AD Users|Users", policy_identity, null),
+//     xdm.event.description = concat(verdict, " ", url, " [", categories, "]"),
+//     xdm.event.outcome = if(verdict = "BLOCKED", XDM_CONST.OUTCOME_FAILED, verdict = "ALLOWED", XDM_CONST.OUTCOME_SUCCESS, to_string(verdict));
+//
+// EXTRAS for proxylogs:
+//     xdm.observer.type = "Secure Web Gateway",
+//     xdm.network.http.referrer = referer,
+//     xdm.source.sent_bytes = to_integer(request_size),
+//     xdm.target.sent_bytes = to_integer(response_size),
+//     xdm.target.file.sha256 = sha256,
+//     xdm.target.file.filename = file_name,
+//     xdm.network.rule = coalesce(rule_id, ruleset_id),
+//     xdm.event.outcome_reason = coalesce(blocked_categories, amp_malware_name),
+
+
+// ===========================================================================
+//  CLOUD DELIVERED FIREWALL - CDFW licence.
+//  Folders: firewalllogs/ and cloudfirewalllogs/ (both names occur)
+// ===========================================================================
+// filter source_log_type in ("firewalllogs", "cloudfirewalllogs")
+// | alter
+//     xdm.observer.vendor = "Cisco",
+//     xdm.observer.product = "Umbrella",
+//     xdm.event.type = "network-connection",
+//     xdm.source.ipv4 = source_ip,
+//     xdm.source.port = to_integer(source_port),
+//     xdm.target.ipv4 = destination_ip,
+//     xdm.target.port = to_integer(destination_port),
+//     xdm.network.ip_protocol = if(ip_protocol = "6", XDM_CONST.IP_PROTOCOL_TCP,
+//                                  ip_protocol = "17", XDM_CONST.IP_PROTOCOL_UDP,
+//                                  ip_protocol = "1", XDM_CONST.IP_PROTOCOL_ICMP,
+//                                  to_string(ip_protocol)),
+//     xdm.network.rule = rule_id,
+//     xdm.event.outcome = if(verdict = "BLOCK", XDM_CONST.OUTCOME_FAILED, verdict = "ALLOW", XDM_CONST.OUTCOME_SUCCESS, to_string(verdict));
+//
+// EXTRAS for firewalllogs:
+//     xdm.observer.type = "Cloud Delivered Firewall",
+//     xdm.observer.name = data_center,
+//     xdm.source.user.identifier = identities,
+//     xdm.source.sent_bytes = to_integer(source_bytes),
+//     xdm.target.sent_bytes = to_integer(destination_bytes),
+//     xdm.target.location.country = destination_country,
+
+
+// ===========================================================================
+//  IP logs - Umbrella IP layer enforcement.  Folder: iplogs/
+// ===========================================================================
+// filter source_log_type = "iplogs"
+// | alter
+//     xdm.observer.vendor = "Cisco",
+//     xdm.observer.product = "Umbrella",
+//     xdm.event.type = "network-connection",
+//     xdm.source.ipv4 = source_ip,
+//     xdm.source.port = to_integer(source_port),
+//     xdm.target.ipv4 = destination_ip,
+//     xdm.target.port = to_integer(destination_port),
+//     xdm.source.user.identifier = identity,
+//     xdm.event.description = concat("IP session [", categories, "]");
+
+
+// ===========================================================================
+//  DLP logs - Umbrella DLP licence.  Folder: dlplogs/
+// ===========================================================================
+// filter source_log_type = "dlplogs"
+// | alter
+//     xdm.observer.vendor = "Cisco",
+//     xdm.observer.product = "Umbrella",
+//     xdm.event.type = "data-loss-prevention",
+//     xdm.target.url = url,
+//     xdm.target.file.filename = file_name,
+//     xdm.target.file.sha256 = file_sha256,
+//     xdm.target.file.size = to_integer(file_size),
+//     xdm.source.user.username = file_owner,
+//     xdm.alert.severity = severity,
+//     xdm.event.description = concat(action, " ", rule_name, " [", data_classification, "]"),
+//     xdm.event.outcome = if(action = "Blocked", XDM_CONST.OUTCOME_FAILED, to_string(action));
+
+
+// ===========================================================================
+//  INTRUSION / IPS logs - CDFW with IPS.  Folder: intrusionlogs/
+// ===========================================================================
+// filter source_log_type = "intrusionlogs"
+// | alter
+//     xdm.observer.vendor = "Cisco",
+//     xdm.observer.product = "Umbrella",
+//     xdm.event.type = "intrusion-detection",
+//     xdm.alert.name = message,
+//     xdm.alert.severity = severity,
+//     xdm.alert.original_threat_id = to_string(sid),
+//     xdm.source.ipv4 = source_ip,
+//     xdm.source.port = to_integer(source_port),
+//     xdm.target.ipv4 = destination_ip,
+//     xdm.target.port = to_integer(destination_port),
+//     xdm.network.rule = rule_id,
+//     xdm.event.outcome = if(action = "blocked", XDM_CONST.OUTCOME_FAILED, XDM_CONST.OUTCOME_SUCCESS);
+
+
+// ===========================================================================
+//  ADMIN AUDIT logs - every licence.  Folder: auditlogs/
+//  NOTE: written only when an administrator changes something. On a quiet org
+//  no audit event exists yet, and the validator will reject these fields as
+//  unknown. Make a policy change in Umbrella, wait one fetch, then enable.
+// ===========================================================================
+// filter source_log_type = "auditlogs"
+// | alter
+//     xdm.observer.vendor = "Cisco",
+//     xdm.observer.product = "Umbrella",
+//     xdm.event.type = "administrative-action",
+//     xdm.event.operation = action,
+//     xdm.event.id = to_string(id),
+//     xdm.source.user.username = coalesce(user, email),
+//     xdm.source.ipv4 = ip,
+//     xdm.event.description = concat(action, " on ", type);
+//
+// EXTRAS for auditlogs:
+//     xdm.source.user.upn = email,
+//     xdm.target.resource.type = type,

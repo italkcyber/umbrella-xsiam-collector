@@ -1,0 +1,574 @@
+import demistomock as demisto  # noqa: F401
+from CommonServerPython import *  # noqa: F401
+from CommonServerUserPython import *  # noqa: F401
+
+"""Cisco Umbrella (Cisco-managed S3 bucket) Event Collector for Cortex XSIAM.
+
+Polls the read-only, Cisco-managed S3 bucket that Umbrella Log Management writes
+to (s3://cisco-managed-<region>/<orgid>_<hash>/) using the access key / secret
+issued in the Umbrella dashboard. No SQS queue, no customer-owned bucket and no
+bucket notifications are required - the collector lists objects itself and keeps
+its own position per log type.
+"""
+
+import csv
+import gzip
+import json
+import re
+import time
+from datetime import datetime, timedelta
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+import boto3
+import requests
+import urllib3
+from botocore.config import Config
+
+# Events are POSTed to an XSIAM HTTP Collector. send_events_to_xsiam() is not an
+# option: Palo Alto document it as working "only if the integration is a system
+# integration", and it fails from custom content with
+#   command 'getLicenseCustomField' is only available for system content
+# The dataset name comes from the vendor/product set on the HTTP Collector itself.
+
+POST_TIMEOUT = 60
+POST_ATTEMPTS = 3
+MAX_POST_BYTES = 1_500_000  # uncompressed NDJSON per request
+
+DEFAULT_MAX_FILES_PER_FETCH = 100
+DEFAULT_MAX_EVENTS_PER_TYPE = 200_000
+SEND_CHUNK = 5_000  # events buffered before a push to the collector
+SEEN_KEYS_MEMORY = 4000  # de-dup ring buffer size, per log type
+OVERLAP_MINUTES = 30  # re-listed window; guards against late-arriving objects
+DEFAULT_MAX_RUNTIME = 240  # seconds; stop cleanly before the container timeout kills us
+
+# Directory names Umbrella creates under the org prefix.
+KNOWN_LOG_TYPES = [
+    "dnslogs",
+    "proxylogs",
+    "firewalllogs",
+    "iplogs",
+    "auditlogs",
+    "dlplogs",
+    "intrusionlogs",
+    "cloudfirewalllogs",
+]
+
+# Column layouts (Umbrella log schema v13). Rows with more columns than the map
+# keep the extras as col_<n> so a schema bump never silently drops data.
+LOG_TYPE_COLUMNS: Dict[str, List[str]] = {
+    "dnslogs": [
+        "timestamp", "policy_identity", "identities", "internal_ip", "external_ip",
+        "action", "query_type", "response_code", "domain", "categories",
+        "policy_identity_type", "identity_types", "blocked_categories",
+        "rule_id", "destination_country", "org_id",
+    ],
+    "proxylogs": [
+        "timestamp", "policy_identity", "internal_ip", "external_ip", "destination_ip",
+        "content_type", "verdict", "url", "referer", "user_agent", "status_code",
+        "request_size", "response_size", "response_body_size", "sha256", "categories",
+        "av_detections", "puas", "amp_disposition", "amp_malware_name", "amp_score",
+        "policy_identity_type", "blocked_categories", "identities", "identity_types",
+        "request_method", "dlp_status", "certificate_errors", "file_name",
+        "ruleset_id", "rule_id", "destination_list_ids", "isolate_action",
+        "file_action", "warn_status",
+    ],
+    "firewalllogs": [
+        "timestamp", "origin_id", "identities", "identity_types", "direction",
+        "ip_protocol", "packet_size", "source_ip", "source_port", "destination_ip",
+        "destination_port", "data_center", "rule_id", "verdict",
+        "fqdns", "destination_list_ids", "first_packet_timestamp",
+        "last_packet_timestamp", "source_packets", "destination_packets",
+        "source_bytes", "destination_bytes", "event_id", "destination_country",
+        "availability_zone", "application", "private_app_id", "private_flow",
+        "posture_id", "casi_category_ids", "traffic_source", "content_category_ids",
+        "content_category_list_ids", "org_id", "source_nat_ip", "egress",
+    ],
+    "iplogs": [
+        "timestamp", "identity", "source_ip", "source_port", "destination_ip",
+        "destination_port", "categories",
+    ],
+    "auditlogs": [
+        "id", "timestamp", "email", "user", "type", "action", "ip", "before", "after",
+    ],
+    "dlplogs": [
+        "timestamp", "event_provider", "event_id", "severity", "network_name",
+        "file_owner", "file_name", "application", "url", "action", "rule_name",
+        "data_classification", "data_identifier", "file_mime_type", "file_size",
+        "file_sha256", "file_label", "application_category_name", "direction",
+        "private_resource_name", "private_resource_group_name", "protocol",
+        "destination_ip", "destination_port", "org_id",
+    ],
+    "intrusionlogs": [
+        "timestamp", "identities", "identity_types", "gid", "sid", "message",
+        "signature_list_id", "severity", "classification", "cves", "protocol",
+        "event_id", "source_ip", "source_port", "destination_ip", "destination_port",
+        "action", "operation_mode", "policy_resource_id", "direction", "rule_id",
+        "ips_config_id", "availability_zone", "application", "casi_category_ids",
+        "data_center", "org_id", "source_nat_ip", "egress", "enforced_by",
+        "ftd_enforcement_id", "ftd_enforcement_name",
+    ],
+}
+LOG_TYPE_COLUMNS["cloudfirewalllogs"] = LOG_TYPE_COLUMNS["firewalllogs"]
+
+# 2019-01-01/2019-01-01-00-00-e4e1.csv.gz
+KEY_DATE_RE = re.compile(r"/(\d{4}-\d{2}-\d{2})/(\d{4}-\d{2}-\d{2})-(\d{2})-(\d{2})-")
+
+
+class XsiamHttpCollector:
+    """Posts newline-delimited JSON to an XSIAM HTTP Collector endpoint."""
+
+    def __init__(self, url: str, token: str, verify: bool, compress: bool = True):
+        self.url = url.strip()
+        self.token = token.strip()
+        self.raw_token = token
+        self.verify = verify
+        self.compress = compress
+
+    def credential_shape(self) -> str:
+        """Describes the stored key without revealing it - a rejected key is nearly
+        always a truncated or whitespace-padded paste, not a wrong key."""
+        notes = []
+        if len(self.raw_token) != len(self.token):
+            notes.append("had surrounding whitespace")
+        if "\n" in self.raw_token or "\r" in self.raw_token:
+            notes.append("contains a line break")
+        if self.token.startswith("{{") or self.token.endswith("}}"):
+            notes.append("looks like an unresolved variable placeholder")
+        shape = f"the stored key is {len(self.token)} characters"
+        return shape + (" (" + "; ".join(notes) + ")" if notes else "")
+
+    def _post(self, ndjson: bytes) -> None:
+        headers = {"Authorization": self.token, "Content-Type": "application/json"}
+        body = ndjson
+        if self.compress:
+            # Must match the collector's Compression setting: gzip here means the
+            # collector must be set to gzip, uncompressed means it must not be.
+            headers["Content-Encoding"] = "gzip"
+            body = gzip.compress(ndjson)
+        last_error = ""
+        for attempt in range(1, POST_ATTEMPTS + 1):
+            if attempt > 1:
+                time.sleep(min(2 ** attempt, 10))
+            try:
+                response = requests.post(self.url, data=body, headers=headers,
+                                         verify=self.verify, timeout=POST_TIMEOUT)
+            except requests.exceptions.RequestException as exc:
+                # Connection resets and timeouts never produce a status code;
+                # they are exactly what the retry loop exists for.
+                last_error = f"transport error: {exc}"
+                demisto.debug(f"HTTP Collector attempt {attempt} failed - {last_error}")
+                continue
+            if response.status_code < 300:
+                return
+            last_error = f"HTTP {response.status_code}: {response.text[:300]}"
+            if response.status_code in (401, 403):
+                last_error += (
+                    f" | The collector rejected the key: {self.credential_shape()}. "
+                    f"Posting to {self.url}. Re-copy the key from the collector and "
+                    "re-enter it on the instance - the URL and key must come from the "
+                    "same collector.")
+            if response.status_code < 500 and response.status_code != 429:
+                break  # 401/403/404 will not improve on a retry
+            demisto.debug(f"HTTP Collector attempt {attempt} failed - {last_error}")
+        raise DemistoException(f"HTTP Collector rejected the batch. {last_error}")
+
+    def send(self, events: List[Dict[str, Any]]) -> None:
+        """Post events as gzipped NDJSON, split at MAX_POST_BYTES.
+
+        Delivery is at-least-once by design: if a later sub-batch fails after an
+        earlier one succeeded, the whole chunk is retried on the next run and the
+        earlier sub-batch's events repeat. Bounded to one SEND_CHUNK; dedupe on
+        s3_key + row if exactness matters downstream.
+        """
+        if not events:
+            return
+        batch: List[bytes] = []
+        size = 0
+        for event in events:
+            line = json.dumps(event, default=str).encode("utf-8")
+            if len(line) + 1 > MAX_POST_BYTES:
+                # A single event larger than a whole request would be rejected
+                # with a non-retryable status, the key would never be marked
+                # seen, and the log type would wedge on it forever. Keep the
+                # feed moving and leave a loud trace instead.
+                demisto.error(
+                    f"Dropping one oversized event ({len(line)} bytes > "
+                    f"{MAX_POST_BYTES}) from {event.get('s3_key', 'unknown object')}")
+                continue
+            if batch and size + len(line) + 1 > MAX_POST_BYTES:
+                self._post(b"\n".join(batch))
+                batch, size = [], 0
+            batch.append(line)
+            size += len(line) + 1
+        if batch:
+            self._post(b"\n".join(batch))
+
+
+class UmbrellaS3Client:
+    def __init__(self, access_key: str, secret_key: str, bucket: str, prefix: str,
+                 region: str, verify: bool, proxy: bool):
+        self.bucket = bucket
+        self.prefix = prefix.strip("/")
+        config = Config(retries={"max_attempts": 5, "mode": "standard"})
+        if proxy:
+            proxies = handle_proxy(proxy_param_name="proxy", checkbox_default_value=False)
+            if proxies:
+                config = config.merge(Config(proxies=proxies))
+        self.client = boto3.client(
+            "s3",
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            region_name=region,
+            verify=verify,
+            config=config,
+        )
+
+    def list_keys(self, log_type: str, start_after: str, limit: int) -> List[str]:
+        """Object keys for a log type, in ascending (== chronological) order."""
+        prefix = f"{self.prefix}/{log_type}/"
+        keys: List[str] = []
+        paginator = self.client.get_paginator("list_objects_v2")
+        kwargs: Dict[str, Any] = {"Bucket": self.bucket, "Prefix": prefix}
+        if start_after:
+            kwargs["StartAfter"] = start_after
+        for page in paginator.paginate(**kwargs):
+            for obj in page.get("Contents", []):
+                key = obj["Key"]
+                if key.endswith("/") or obj.get("Size", 0) == 0:
+                    continue
+                keys.append(key)
+                if len(keys) >= limit:
+                    return keys
+        return keys
+
+    def discover_log_types(self) -> List[str]:
+        # Unpaginated on purpose: Umbrella creates at most ~8 folders per org,
+        # far below the 1000-CommonPrefixes page limit.
+        resp = self.client.list_objects_v2(
+            Bucket=self.bucket, Prefix=f"{self.prefix}/", Delimiter="/")
+        found = []
+        for cp in resp.get("CommonPrefixes", []):
+            name = cp["Prefix"].rstrip("/").rsplit("/", 1)[-1]
+            if name:
+                found.append(name)
+        return found
+
+    def get_object_lines(self, key: str) -> List[str]:
+        body = self.client.get_object(Bucket=self.bucket, Key=key)["Body"].read()
+        if key.endswith(".gz"):
+            body = gzip.decompress(body)
+        return body.decode("utf-8", errors="replace").splitlines()
+
+
+def key_start_marker(prefix: str, log_type: str, start_time: datetime) -> str:
+    """A StartAfter marker sitting just before the first object of start_time's minute."""
+    return (f"{prefix}/{log_type}/{start_time.strftime('%Y-%m-%d')}/"
+            f"{start_time.strftime('%Y-%m-%d-%H-%M')}-")
+
+
+def key_to_datetime(key: str) -> Optional[datetime]:
+    """Umbrella embeds the upload minute in the object name."""
+    match = KEY_DATE_RE.search(key)
+    if not match:
+        return None
+    _, day, hour, minute = match.groups()
+    try:
+        return datetime.strptime(f"{day} {hour}:{minute}", "%Y-%m-%d %H:%M")
+    except ValueError:
+        return None
+
+
+def key_to_time(key: str) -> Optional[str]:
+    moment = key_to_datetime(key)
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.000Z") if moment else None
+
+
+def normalize_time(raw: str) -> Optional[str]:
+    """Umbrella writes UTC 'YYYY-MM-DD HH:MM:SS'; audit logs may use ISO8601."""
+    if not raw:
+        return None
+    raw = raw.strip().strip('"')
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%SZ",
+                "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S.%fZ"):
+        try:
+            return datetime.strptime(raw, fmt).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        except ValueError:
+            continue
+    return None
+
+
+def row_to_event(row: List[str], columns: List[str], log_type: str, key: str) -> Dict[str, Any]:
+    event: Dict[str, Any] = {}
+    for index, value in enumerate(row):
+        name = columns[index] if index < len(columns) else f"col_{index}"
+        event[name] = value
+    event["source_log_type"] = log_type
+    event["s3_key"] = key
+    event["_time"] = normalize_time(str(event.get("timestamp", ""))) or key_to_time(key)
+    return event
+
+
+def parse_file(lines: List[str], log_type: str, key: str,
+               columns_override: Dict[str, List[str]]) -> List[Dict[str, Any]]:
+    columns = columns_override.get(log_type) or LOG_TYPE_COLUMNS.get(log_type) or []
+    events: List[Dict[str, Any]] = []
+    for row in csv.reader(lines):
+        if not row or not any(cell.strip() for cell in row):
+            continue
+        # Some log types (audit) ship a header row - skip it.
+        if columns and row[0].strip().strip('"').lower() == columns[0].lower():
+            continue
+        events.append(row_to_event(row, columns, log_type, key))
+    return events
+
+
+def get_log_types(params: Dict[str, Any], client: UmbrellaS3Client) -> List[str]:
+    selected = argToList(params.get("log_types")) or ["dnslogs"]
+    if "auto" in [s.lower() for s in selected]:
+        discovered = client.discover_log_types()
+        demisto.debug(f"Discovered log types under the prefix: {discovered}")
+        return discovered or KNOWN_LOG_TYPES
+    return selected
+
+
+def parse_column_overrides(raw: Optional[str]) -> Dict[str, List[str]]:
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError) as exc:
+        raise DemistoException(f"Column overrides must be valid JSON: {exc}")
+    if not isinstance(data, dict):
+        raise DemistoException(
+            'Column overrides must be a JSON object, e.g. {"dnslogs": ["timestamp", ...]}.')
+    return {key: list(value) for key, value in data.items()}
+
+
+def collect_log_type(client: UmbrellaS3Client, log_type: str, state: Dict[str, Any],
+                     first_fetch: datetime, max_files: int, max_events: int,
+                     columns_override: Dict[str, List[str]],
+                     send: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+                     persist: Optional[Callable[[Dict[str, Any]], None]] = None,
+                     deadline: Optional[float] = None
+                     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], int]:
+    """Collect one log type. Returns (sample_for_display, new_state, events_sent).
+
+    The cursor deliberately lags the newest object seen by OVERLAP_MINUTES, because
+    Umbrella object names carry a random suffix: a file uploaded late sorts before
+    one already processed, and a cursor parked at the maximum key would skip it
+    forever. The re-listed window is de-duplicated against seen_keys.
+    """
+    start_after = state.get("start_after") or key_start_marker(
+        client.prefix, log_type, first_fetch)
+    seen: List[str] = list(state.get("seen_keys") or [])
+    seen_set = set(seen)
+
+    keys = client.list_keys(log_type, start_after, max_files)
+    demisto.debug(f"[{log_type}] listed {len(keys)} object(s) after {start_after}")
+
+    buffer: List[Dict[str, Any]] = []
+    pending: List[str] = []
+    display: List[Dict[str, Any]] = []
+    sent = 0
+    newest = key_to_datetime(start_after)
+    current_state = dict(state) or {}
+
+    def commit() -> None:
+        """Push what is buffered, then record those keys as done."""
+        nonlocal buffer, pending, sent, newest, current_state
+        if not buffer and not pending:
+            return
+        if buffer and send:
+            send(buffer)
+        sent += len(buffer)
+        buffer = []
+        for key in pending:
+            if key not in seen_set:
+                seen.append(key)
+                seen_set.add(key)
+            moment = key_to_datetime(key)
+            if moment and (newest is None or moment > newest):
+                newest = moment
+        pending = []
+        del seen[:-SEEN_KEYS_MEMORY]
+        cursor = start_after
+        if newest:
+            cursor = max(cursor, key_start_marker(
+                client.prefix, log_type, newest - timedelta(minutes=OVERLAP_MINUTES)))
+        current_state = {"start_after": cursor, "seen_keys": list(seen)}
+        if persist:
+            persist(current_state)
+
+    for key in keys:
+        if deadline is not None and time.time() > deadline:
+            # Stop on our own terms rather than being killed by the container
+            # timeout. Everything already pushed is committed; the next run
+            # resumes from the persisted cursor.
+            demisto.info(f"[{log_type}] run time budget reached; committing progress "
+                         f"and resuming on the next fetch")
+            break
+        if key in seen_set:
+            continue
+        try:
+            events = parse_file(client.get_object_lines(key), log_type, key, columns_override)
+        except Exception as exc:  # one unreadable object must not stall the feed
+            demisto.error(f"[{log_type}] failed to read {key}: {exc}")
+            pending.append(key)
+            continue
+
+        buffer.extend(events)
+        pending.append(key)
+        if len(display) < 50:
+            display.extend(events[: 50 - len(display)])
+        if len(buffer) >= SEND_CHUNK:
+            commit()
+        if sent + len(buffer) >= max_events:
+            demisto.info(f"[{log_type}] reached max events per fetch ({max_events}); "
+                         f"the rest is picked up on the next run")
+            break
+
+    commit()
+    return display, current_state, sent
+
+
+def build_client(params: Dict[str, Any]) -> UmbrellaS3Client:
+    credentials = params.get("credentials") or {}
+    access_key = credentials.get("identifier")
+    secret_key = credentials.get("password")
+    if not access_key or not secret_key:
+        raise DemistoException("Umbrella S3 access key and secret key are required.")
+    bucket = (params.get("bucket") or "cisco-managed-us-west-1").strip().replace("s3://", "").strip("/")
+    prefix = (params.get("prefix") or "").strip().strip("/")
+    if not prefix:
+        raise DemistoException("The bucket prefix (your <orgid>_<hash> folder) is required.")
+    region = (params.get("region") or "").strip()
+    if not region:
+        match = re.match(r"cisco-managed-(.+)$", bucket)
+        region = match.group(1) if match else "us-west-1"
+        if not match:
+            demisto.info(f"Could not derive a region from bucket '{bucket}'; "
+                         f"defaulting to {region}. Set the region field if this is wrong.")
+    if params.get("insecure", False):
+        urllib3.disable_warnings()  # the user opted out of verification; don't spam the log
+    return UmbrellaS3Client(
+        access_key=access_key,
+        secret_key=secret_key,
+        bucket=bucket,
+        prefix=prefix,
+        region=region,
+        verify=not params.get("insecure", False),
+        proxy=params.get("proxy", False),
+    )
+
+
+def build_collector(params: Dict[str, Any]) -> XsiamHttpCollector:
+    url = (params.get("xsiam_url") or "").strip()
+    token = (params.get("xsiam_token") or {}).get("password") \
+        if isinstance(params.get("xsiam_token"), dict) else params.get("xsiam_token")
+    token = (token or "").strip()
+    if not url or not token:
+        raise DemistoException(
+            "The XSIAM HTTP Collector URL and API key are required. Create a custom HTTP "
+            "collector under Settings > Data Sources, set its vendor to 'cisco' and product "
+            "to 'umbrella_s3', and copy the URL and key it shows you.")
+    if not url.rstrip("/").endswith("/logs/v1/event"):
+        raise DemistoException(
+            f"The HTTP Collector URL should end in /logs/v1/event - got: {url}")
+    return XsiamHttpCollector(url, token, verify=not params.get("insecure", False),
+                              compress=not params.get("no_compression", False))
+
+
+def test_module(client: UmbrellaS3Client, params: Dict[str, Any]) -> str:
+    log_types = get_log_types(params, client)
+    if not log_types:
+        raise DemistoException(
+            f"Connected to s3://{client.bucket}, but no log folders were found under "
+            f"{client.prefix}/. Check the prefix, or wait one upload cycle if logging "
+            "was only just enabled.")
+    client.client.list_objects_v2(
+        Bucket=client.bucket, Prefix=f"{client.prefix}/{log_types[0]}/", MaxKeys=1)
+    return "ok"
+
+
+def main() -> None:
+    params = demisto.params()
+    command = demisto.command()
+    demisto.debug(f"Command: {command}")
+
+    try:
+        client = build_client(params)
+        collector = build_collector(params)
+        first_fetch = arg_to_datetime(
+            params.get("first_fetch") or "3 days", "First fetch time", required=True)
+        if first_fetch is None:
+            raise DemistoException("First fetch time could not be parsed.")
+        max_files = arg_to_number(params.get("max_files_per_fetch")) or DEFAULT_MAX_FILES_PER_FETCH
+        max_events = arg_to_number(params.get("max_events_per_fetch")) or DEFAULT_MAX_EVENTS_PER_TYPE
+        columns_override = parse_column_overrides(params.get("column_overrides"))
+
+        if command == "test-module":
+            return_results(test_module(client, params))
+
+        elif command == "cisco-umbrella-s3-get-events":
+            args = demisto.args()
+            requested = argToList(args.get("log_type"))
+            if any(t.lower() == "auto" for t in requested):
+                log_types = client.discover_log_types()
+                demisto.debug(f"Discovered log types: {log_types}")
+            else:
+                log_types = requested or get_log_types(params, client)
+            limit_files = arg_to_number(args.get("limit")) or 1
+            push = argToBoolean(args.get("should_push_events", "false"))
+            all_events: List[Dict[str, Any]] = []
+            for log_type in log_types:
+                events, _, _ = collect_log_type(
+                    client, log_type, {}, first_fetch, limit_files,
+                    max_events, columns_override,
+                    send=collector.send if push else None)
+                all_events.extend(events)
+            return_results(CommandResults(
+                readable_output=tableToMarkdown(
+                    "Cisco Umbrella S3 events (sample)", all_events, removeNull=True),
+                raw_response=all_events,
+            ))
+
+        elif command == "fetch-events":
+            last_run = demisto.getLastRun() or {}
+            log_types = get_log_types(params, client)
+            max_runtime = arg_to_number(params.get("max_runtime_seconds")) or DEFAULT_MAX_RUNTIME
+            deadline = time.time() + max_runtime
+            total = 0
+            try:
+                for log_type in log_types:
+                    def persist(new_state: Dict[str, Any], _type: str = log_type) -> None:
+                        last_run[_type] = new_state
+                        demisto.setLastRun(last_run)
+
+                    _, new_state, sent = collect_log_type(
+                        client, log_type, last_run.get(log_type, {}), first_fetch,
+                        max_files, max_events, columns_override,
+                        send=collector.send, persist=persist, deadline=deadline)
+                    last_run[log_type] = new_state
+                    total += sent
+                    if time.time() > deadline:
+                        demisto.info("Run time budget reached; remaining log types "
+                                     "are collected on the next fetch")
+                        break
+            finally:
+                demisto.setLastRun(last_run)
+            # Reports the run to the instance health panel. The "Count Received"
+            # column on a data source is fed by the ingestion pipeline itself, so it
+            # stays on the HTTP Collector row, not here - this is what a custom
+            # integration can report about itself.
+            demisto.updateModuleHealth({"eventsPulled": total})
+            demisto.info(f"Sent {total} events to the HTTP Collector.")
+
+        else:
+            raise NotImplementedError(f"Command {command} is not implemented.")
+
+    except Exception as exc:
+        return_error(f"Failed to execute {command}. Error: {exc}")
+
+
+if __name__ in ("__main__", "__builtin__", "builtins"):
+    main()
